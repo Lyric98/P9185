@@ -1,0 +1,514 @@
+---
+title: "P9185_project1"
+author: "Fanyu, Ryan, Serena"
+date: "2024-02-15"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(lme4)
+library(nlme)
+library(lattice)
+library(gtsummary)
+library(DHARMa)
+library(knitr)
+library(kableExtra)
+library(webshot)
+baseline.dat <- read.csv("../baseline.csv")
+endpoints.dat <- read.csv("../endpoints.csv")
+```
+
+```{r}
+baseline.dat <- read.csv("baseline.csv")
+endpoints.dat <- read.csv("endpoints.csv")
+```
+
+## Data cleaning and EDA
+
+```{r datacleaning_primary}
+endpoints.AE <-
+  endpoints.dat %>% 
+  select(ptid,  AE_pillA_week1:AE_gelC_week4) %>% 
+  pivot_longer(
+    cols = starts_with("AE_"),
+    names_to = c("drug", "week"),
+    names_pattern = "AE_(.*)_(week\\d+)",
+    values_to = "AE"
+  ) %>%
+  mutate(drug = case_when(
+    str_detect(drug, "pillA") ~ "Pill A",
+    str_detect(drug, "gelB") ~ "Gel B",
+    str_detect(drug, "gelC") ~ "Gel C"
+  ),
+  week = parse_number(week))
+
+endpoints.Adhere <-
+  endpoints.dat %>% 
+  select(ptid, Adhere_pillA_week1:Adhere_gelC_week4) %>% 
+  pivot_longer(
+    cols = starts_with("Adhere_"),
+    names_to = c("drug", "week"),
+    names_pattern = "Adhere_(.*)_(week\\d+)",
+    values_to = "Adhere"
+  ) %>%
+  mutate(drug = case_when(
+    str_detect(drug, "pillA") ~ "Pill A",
+    str_detect(drug, "gelB") ~ "Gel B",
+    str_detect(drug, "gelC") ~ "Gel C"
+  ),
+  week = parse_number(week)) %>% 
+  mutate(drug = factor(drug, levels = c("Pill A", "Gel B", "Gel C")))
+
+endpoints.period <- 
+  endpoints.dat %>% 
+  select(ptid, period1:period3) %>% 
+  mutate(sequence = case_when(
+    period1 == "Pill A" & period2 == "Gel B" & period3 == "Gel C" ~ "ABC",
+    period1 == "Pill A" & period2 == "Gel C" & period3 == "Gel B" ~ "ACB",
+    period1 == "Gel B" & period2 == "Gel C" & period3 == "Pill A" ~ "BCA",
+    period1 == "Gel B" & period2 == "Pill A" & period3 == "Gel C" ~ "BAC",
+    period1 == "Gel C" & period2 == "Pill A" & period3 == "Gel B" ~ "CAB",
+    period1 == "Gel C" & period2 == "Gel B" & period3 == "Pill A" ~ "CBA",
+    TRUE ~ "Other" # This is the default case
+  )) %>% 
+  mutate(
+    seq1 = case_when(
+    sequence == "ABC" ~ 1,
+    sequence == "CAB" ~ 2,
+    sequence == "BCA" ~ 3,
+    sequence == "BAC" ~ 4,
+    sequence == "ACB" ~ 5,
+    sequence == "CBA" ~ 6,
+  ),
+    seq2 = case_when(
+      sequence == "ABC" | sequence == "BAC" ~ 0,
+      sequence == "CAB" | sequence == "ACB" ~ 1,
+      sequence == "BCA" | sequence == "CBA" ~ 2
+    )) %>% 
+  pivot_longer(
+    cols = starts_with("period"),
+    names_prefix = "period",
+    names_to = "period",
+    values_to = "drug"
+  ) %>% 
+  mutate(period = as.numeric(period)) %>% 
+  mutate(drug = factor(drug, levels = c("Pill A", "Gel B", "Gel C"))) %>% 
+  mutate(seq2 = factor(seq2, levels = c(0,1,2), labels = c("AB", "AC", "BC")))
+
+endpoints.lag <- 
+  endpoints.period %>% 
+  select(ptid, period, drug) %>% 
+  group_by(ptid) %>% 
+  mutate(drug_lag = lag(as.character(drug))) %>% 
+  ungroup() %>% 
+  replace_na(list(drug_lag = "None")) %>% 
+  mutate(
+    A_lag = ifelse(drug_lag == "Pill A", 1, 0),
+    B_lag = ifelse(drug_lag == "Gel B", 1, 0),
+    C_lag = ifelse(drug_lag == "Gel C", 1, 0)
+  )%>% 
+  mutate(drug = factor(drug, levels = c("Pill A", "Gel B", "Gel C")))
+
+endpoints.period <- left_join(endpoints.period, endpoints.lag)
+
+endpoints.AE <- left_join(endpoints.AE, endpoints.period)
+
+endpoints.Adhere <- left_join(endpoints.Adhere, endpoints.period)
+```
+
+```{r datacleaning_model}
+endpoints.AE.weeksum <- 
+  endpoints.AE %>% 
+  select(-week) %>% 
+  group_by(ptid,drug,period) %>% 
+  mutate(AE_sum  = sum(AE)) %>% 
+  ungroup() %>% 
+  mutate(AE_ind = as.factor(ifelse(AE_sum > 0, 1, 0))) %>% 
+  select(-AE) %>% 
+  distinct() %>% 
+  mutate(drug = factor(drug, levels = c("Pill A", "Gel B", "Gel C")))
+
+endpoints.Adhere <-
+  endpoints.Adhere %>% 
+  mutate(total_week = period*week,
+         nonAdhere = 7-Adhere)
+```
+
+```{r datacleaning_PK}
+# 0- baseline; 1- 1st treatment; 2- 1st wash out; 3- 2nd treatment;
+# 4- 2nd wash out; 5- third treatment; 6- third wash out
+endpoints.PK <-
+  baseline.dat %>% 
+  select(ptid, bviral0:sviral6) %>% 
+  mutate(
+    dbvial1 = -bviral1 - bviral0,
+    dsvial1 = -sviral1 - sviral0,
+    dbvial2 = -bviral3 - bviral2,
+    dsvial2 = -sviral3 - sviral2,
+    dbvial3 = -bviral5 - bviral4,
+    dsvial3 = -sviral5 - sviral4
+  ) %>% 
+  pivot_longer(
+    cols = starts_with("d"),
+    names_to = c("measure", "period"),
+    names_pattern = "d(.*vial)(\\d+)",
+    values_to = "dvalue"
+  ) %>% 
+  select(ptid, measure, period, dvalue) %>% 
+  mutate(period = as.numeric(period),
+         dvalue = -dvalue) 
+  
+
+```
+
+
+```{r}
+endpoints.Adhere.sum <-
+  endpoints.Adhere %>% 
+  select(ptid, period, week, Adhere) %>% 
+  group_by(ptid, period) %>% 
+  summarize(Adhere_sum  = sum(Adhere)) %>% 
+  mutate(Adhere_rate = Adhere_sum/28)
+
+endpoints.PK <- left_join(endpoints.PK, endpoints.Adhere.sum)
+endpoints.PK <- 
+  left_join(endpoints.PK, endpoints.AE.weeksum) %>% 
+  mutate(drug = factor(drug, levels = c("Pill A", "Gel B", "Gel C"))) %>% 
+  mutate(measure = factor(measure, labels = c("Skin", "Blood"),levels = c("svial", "bvial"))) %>% 
+  mutate(AE_ind = factor(ifelse(AE_ind == 1,"Yes", "No")))
+
+#endpoints.PK.bvial <- endpoints.PK %>% filter(measure == "bvial")
+#endpoints.PK.svial <- endpoints.PK %>% filter(measure == "svial")
+```
+
+
+```{r}
+Adhere.demo <-
+  baseline.dat %>% 
+  select(ptid, age, gender, race) %>% 
+  mutate(
+    gender = factor(gender, labels = c("male", "female"), levels = c(0,1)),
+    race = factor(race, levels = c("white", "black", "others"))
+  )
+
+endpoints.Adhere.total <- 
+  endpoints.Adhere.sum %>% 
+  select(ptid, Adhere_sum) %>% 
+  group_by(ptid) %>% 
+  summarize(Adhere_total = sum(Adhere_sum))
+
+Adhere.demo <- left_join(Adhere.demo, endpoints.Adhere.total) %>% 
+  mutate(non_Adhere_total = 84 - Adhere_total)
+```
+
+```{r eda_ae, eval = F}
+# AE response
+traj.AE <-
+  endpoints.AE.weeksum %>% 
+  ggplot(aes(x = period, y = AE_ind)) +
+  geom_line(alpha = 0.2, aes(group = factor(ptid))) + 
+  geom_point(alpha = 0.1, size = 0.8)
+
+traj.AE
+```
+```{r eda_adhere, eval = F}
+# AE response
+traj.Adhere <-
+  endpoints.Adhere %>% 
+  ggplot(aes(x = total_week, y = Adhere)) +
+  geom_line(alpha = 0.2, aes(group = factor(ptid))) + 
+  geom_point(alpha = 0.1, size = 0.8)
+
+traj.Adhere
+
+xyplot(Adhere ~ period, endpoints.Adhere, type=c('g','p','l'))
+```
+
+
+## Primary Objective
+
+### Safety
+
+#### Testing crossover effects
+
+```{r }
+endpoints.AE.weeksum <- left_join(endpoints.AE.weeksum, Adhere.demo)
+# centered age for better interpretation
+endpoints.AE.weeksum$age <- endpoints.AE.weeksum$age - mean(endpoints.AE.weeksum$age)
+AE.crossover.model <- glmer(AE_ind ~ period + seq2 + (1|ptid), data = endpoints.AE.weeksum, family = binomial)
+summary(AE.crossover.model)
+```
+No significant crossover effect found.
+
+### Modeling
+
+```{r model_ae}
+#model.AE.1 <- glmer(AE_ind ~ drug + period + seq2 + (1|ptid), data = endpoints.AE.weeksum, family = binomial)
+#summary(model.AE.1)
+
+#model.AE.lag <- glmer(AE_ind ~ drug + period + A_lag + B_lag + C_lag + (1|ptid), data = endpoints.AE.weeksum, family = binomial)
+#summary(model.AE.lag)
+
+model.AE <- glmer(AE_ind ~ drug + period + age + gender + race + (1|ptid), data = endpoints.AE.weeksum, family = binomial, nAGQ = 6)
+summary(model.AE)
+
+tbl.AE <- 
+  model.AE %>% 
+  tbl_regression(
+    estimate_fun = function(x) style_number(x, digits = 3), 
+    exponentiate = T,
+    label = list(
+      drug ~ "Treatment",
+      period ~ "Period",
+      age ~ "Age",
+      gender ~ "Gender",
+      race ~ "Race"
+    ),
+    include = everything())
+
+# Convert tbl_regression to gt for more flexible handling
+gt.AE <- tbl.AE %>% as_gt()
+gt::gtsave(gt.AE, file = "./image/tbl_AE.png")
+
+
+# Model diagnostic
+
+plot(model.AE)
+
+# Model comparison
+#model.AE.nolag <- glmer(AE_ind ~ drug + period + (1|ptid), data = endpoints.AE.weeksum, family = binomial)
+#summary(model.AE.nolag)
+
+#anova(model.AE.lag, model.AE.nolag)
+```
+
+
+### Adherence
+
+#### Testing crossover effects
+
+```{r}
+endpoints.Adhere <- left_join(endpoints.Adhere, Adhere.demo)
+endpoints.Adhere$age <- endpoints.Adhere$age - mean(endpoints.Adhere$age)
+Adhere.crossover.model <- glmer(cbind(Adhere, nonAdhere) ~ period + week + seq2 + (1|ptid), data = endpoints.Adhere, family = binomial)
+summary(Adhere.crossover.model)
+```
+No significant crossover effect found.
+
+#### Modelling
+
+```{r model_adhere}
+model.Adhere <- glmer(cbind(Adhere, nonAdhere) ~ period + week + drug + age + gender + race + (1|ptid), data = endpoints.Adhere, family = binomial, nAGQ = 4)
+summary(model.Adhere)
+
+tbl.Adhere <- 
+  model.Adhere %>% 
+  tbl_regression(
+    estimate_fun = function(x) style_number(x, digits = 3), 
+    exponentiate = T,
+    label = list(
+      week ~ "Week",
+      drug ~ "Treatment",
+      period ~ "Period",
+      age ~ "Age",
+      gender ~ "Gender",
+      race ~ "Race"
+    ))
+
+# Convert tbl_regression to gt for more flexible handling
+gt.Adhere <- tbl.Adhere %>% as_gt()
+gt::gtsave(gt.Adhere, file = "./image/tbl_Adhere.png")
+
+# model comparison
+#model.Adhere.nolag <- glmer(cbind(Adhere, nonAdhere) ~ period + week + drug + (1|ptid), data = endpoints.Adhere, family = binomial, nAGQ = 5)
+
+#anova(model.Adhere.1, model.Adhere.nolag)
+```
+## Secondary Objective
+
+### Effects of AE and Adhere on PK
+
+```{r eda_PK, eval = F}
+traj.PK <-
+  endpoints.PK %>% 
+  ggplot(aes(x = period, y = dvalue, group = measure)) +
+  geom_smooth(method = "lm", se = FALSE, show.legend = FALSE) +
+  geom_line(alpha = 0.2, aes(group = factor(ptid))) + 
+  geom_point(alpha = 0.1, size = 0.8) +
+  facet_wrap(vars(measure), scales = "free_y")
+
+
+traj.PK
+```
+#### Testing crossover effects
+
+```{r crossover_PK}
+
+endpoints.PK <- left_join(endpoints.PK, Adhere.demo)
+PK.crossover.model.bviral <- lmer(dvalue ~ period + seq2 + (1|ptid) , data = endpoints.PK %>% filter(measure == "Blood"))
+summary(PK.crossover.model.bviral)
+PK.crossover.model.sviral <- lmer(dvalue ~ period + seq2 + (1|ptid) , data = endpoints.PK %>% filter(measure == "Skin"))
+summary(PK.crossover.model.sviral)
+```
+
+No significant crossover effect found for both type of measurements.
+
+#### Modelling
+
+```{r model_PK}
+endpoints.PK <- 
+  endpoints.PK %>% 
+  mutate(age = age - mean(age)) %>% 
+  group_by(period) %>% 
+  mutate(Adhere_mean = mean(Adhere_sum), .keep = "all") %>% 
+  ungroup() %>% 
+  mutate(Adhere_sum_centered = Adhere_sum - Adhere_mean)
+# Combinging two measures into one model
+model.PK.bviral <- lmer(dvalue ~ drug + period + Adhere_sum_centered + AE_ind + age + gender + race + (1|ptid) , data = endpoints.PK %>% filter(measure == "Blood"))
+summary(model.PK.bviral)
+# refactor (A as reference)
+
+model.PK.sviral <- lmer(dvalue ~ drug + period + Adhere_sum_centered + AE_ind + age + gender + race + (1|ptid) , data = endpoints.PK %>% filter(measure == "Skin"))
+summary(model.PK.sviral)
+
+tbl.PK.bviral <- 
+  model.PK.bviral %>% 
+  tbl_regression(
+    estimate_fun = function(x) style_number(x, digits = 3), 
+    exponentiate = F,
+    label = list(
+      Adhere_sum_centered ~ "Days of adherece (within a period, centered)",
+      drug ~ "Treatment",
+      period ~ "Period",
+      age ~ "Age",
+      gender ~ "Gender",
+      race ~ "Race",
+      AE_ind ~ "Occurence of adverse effects"
+    ))
+
+
+gt.PK.bviral <- tbl.PK.bviral %>% as_gt()
+gt::gtsave(gt.PK.bviral, file = "./image/tbl_PK_bviral.png")
+
+tbl.PK.sviral <- 
+  model.PK.sviral %>% 
+  tbl_regression(
+    estimate_fun = function(x) style_number(x, digits = 3), 
+    exponentiate = F,
+    label = list(
+      Adhere_sum_centered ~ "Days of adherece (within a period, centered)",
+      drug ~ "Treatment",
+      period ~ "Period",
+      age ~ "Age",
+      gender ~ "Gender",
+      race ~ "Race",
+      AE_ind ~ "Occurence of adverse effects"
+    ))
+
+
+gt.PK.sviral <- tbl.PK.sviral %>% as_gt()
+gt::gtsave(gt.PK.sviral, file = "./image/tbl_PK_sviral.png")
+#model.PK %>% tbl_regression()
+```
+
+### Demographic difference
+
+Redundant model? Already did the analysis when doing adherence analysis.
+```{r}
+# gender change to factors
+model.demo <- glm(cbind(Adhere_total, non_Adhere_total) ~ age + gender + race, data = Adhere.demo, family = binomial)
+
+summary(model.demo)
+
+tbl_regression(model.demo, exponentiate = T)
+
+tbl.demo <- 
+  model.demo %>% 
+  tbl_regression(
+    estimate_fun = function(x) style_number(x, digits = 3), 
+    exponentiate = T,
+    label = list(
+      age ~	"Age",
+      gender ~ "Gender",
+      race ~ "Race"
+    ))
+
+gt.demo <- tbl.demo %>% as_gt()
+gt::gtsave(gt.demo, file = "./image/tbl_demo.png")
+```
+
+
+```{r}
+endpoints.Adhere.regimen <-
+  endpoints.Adhere %>% 
+  mutate(product = factor(ifelse(drug == "Pill A", "Pill", "Gel"), levels = c("Pill", "Gel")),
+         freq = factor(case_when(
+           drug == "Pill A" ~ "once",
+           drug == "Gel B" ~ "three times",
+           drug == "Gel C" ~ "once"
+         ), levels = c("once", "three times")))
+
+model.Adhere.product.1 <- glmtoolbox::glmgee(cbind(Adhere, nonAdhere) ~ period + week + age*product + gender*product + race*product, data = endpoints.Adhere.regimen, family = binomial, id = ptid, corstr = "Independence")
+
+model.Adhere.product.2 <- glmtoolbox::glmgee(cbind(Adhere, nonAdhere) ~ period + week + age*product + gender*product + race*product, data = endpoints.Adhere.regimen, family = binomial, id = ptid, corstr = "AR-M-dependent(1)")
+
+model.Adhere.product.3 <- glmtoolbox::glmgee(cbind(Adhere, nonAdhere) ~ period + week + age*product + gender*product + race*product, data = endpoints.Adhere.regimen, family = binomial, id = ptid, corstr = "Exchangeable")
+
+AIC(model.Adhere.product.1)
+AIC(model.Adhere.product.2)
+AIC(model.Adhere.product.3)
+
+summary(model.Adhere.product.1)
+summary(model.Adhere.product.2)
+summary(model.Adhere.product.3)
+
+model.Adhere.freq.1 <- glmtoolbox::glmgee(cbind(Adhere, nonAdhere) ~ period + week + age*freq + gender*freq + race*freq, data = endpoints.Adhere.regimen, family = binomial, id = ptid, corstr = "Independence")
+model.Adhere.freq.2 <- glmtoolbox::glmgee(cbind(Adhere, nonAdhere) ~ period + week + age*freq + gender*freq + race*freq, data = endpoints.Adhere.regimen, family = binomial, id = ptid, corstr = "AR-M-dependent(1)")
+model.Adhere.freq.3 <- glmtoolbox::glmgee(cbind(Adhere, nonAdhere) ~ period + week + age*freq + gender*freq + race*freq, data = endpoints.Adhere.regimen, family = binomial, id = ptid, corstr = "Exchangeable")
+
+AIC(model.Adhere.freq.1)
+AIC(model.Adhere.freq.2)
+AIC(model.Adhere.freq.3)
+
+summary(model.Adhere.freq.1)
+summary(model.Adhere.product.2)
+summary(model.Adhere.product.3)
+```
+
+
+### Demographic difference 
+
+## Table one
+
+```{r}
+baseline.demo <-
+  left_join(Adhere.demo, baseline.dat %>% select(ptid, bviral0, sviral0)) %>% 
+  left_join(
+    .,
+    endpoints.period %>% select(ptid, sequence) %>% distinct()
+  )
+library(table1)
+baseline.demo$gender <- factor(baseline.demo$gender, levels = c("male", "female"), labels = c("Male", "Female"))
+baseline.demo$race <- factor(baseline.demo$race, levels = c("white", "black", "others"), labels = c("White", "Black", "Others"))
+
+
+label(baseline.demo$gender) = "Gender"
+label(baseline.demo$race) = "Race"
+label(baseline.demo$age) = "Age"
+label(baseline.demo$bviral0) = "Baseline blood viral load"
+label(baseline.demo$sviral0) = "Baseline skin viral load"
+label(baseline.demo$sequence) = "Treatment sequence"
+library(gt)
+demo.tab <-
+  table1(~ age + gender + race + bviral0 + sviral0 | sequence,
+    data=baseline.demo, caption="") %>% as.data.frame() %>% gt()
+demo.tab
+
+gtsave(demo.tab, filename = "table1.png")
+```
+

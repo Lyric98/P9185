@@ -1,0 +1,710 @@
+---
+title: "9185_project1"
+author: "Shubo Zhang"
+date: "2024-02-17"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(reshape2)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(gee)
+library(stats)
+library(CrossCarry)
+library(lme4)
+library(nlme)
+library(lattice)
+library(gtsummary)
+library(sandwich)
+library(clubSandwich)
+library(lmtest)
+virals <- read.csv("../baseline.csv")
+endpoints <- read.csv("../endpoints.csv")
+```
+
+```{r}
+generate_result_summary = function(model, model_type, data) {
+  sand_se = sqrt(diag(vcovCR(model, cluster = data$ptid, type = "CR0")))
+  sand_coef_test = coef_test(model, vcov = "CR0", cluster = data$ptid, test = "naive-t")
+  aic = AIC(model)
+  bic = BIC(model)
+  if (model_type == "lm") {
+    res = cbind(summary(model)$coef[, 1:2], sand_se)
+    r2 = summary(model)$r.squared
+  } else if (model_type == "gls") {
+    res = cbind(summary(model)$tTable[, 1:2], sand_se)
+    
+    n = nrow(data)
+    null_model = lm(y ~ 1, data = data)
+    r2 = as.numeric(1 - exp(- 2 / n * (logLik(model) - logLik(null_model))))
+  } else if (model_type == "lmm") {
+    res = cbind(summary(model)$coef[, 1:2], sand_se)
+    
+    n = nrow(data)
+    null_model = lm(y ~ 1, data = data)
+    r2 = as.numeric(1 - exp(- 2 / n * (logLik(model) - logLik(null_model))))
+  } else {
+    stop("undefined model")
+  }
+  metrics = c(aic, bic, r2)
+  names(metrics) = c("AIC", "BIC", "R2")
+  return(list(sand_se = sand_se, 
+              sand_coef_test = sand_coef_test,
+              res_table = res,
+              metrics = metrics))
+}
+```
+
+```{r}
+### viral loads in the blood plasma
+#### A effect
+virals_blood_long = melt(virals, id.var = c("ptid", "period1", "period2", "period3"), measure.vars = c("bviral0", "bviral1", "bviral2", "bviral3", "bviral4", "bviral5", "bviral6"))
+
+A_pureeffect <- virals_blood_long[virals_blood_long$period1=="Pill A"&virals_blood_long$variable %in% c("bviral0", "bviral1", "bviral2"),]
+A_pureeffect$group = "A"
+A_pureeffect <- A_pureeffect[, -c(2,3,4)]
+A_pureeffect$variable <- ifelse(A_pureeffect$variable=="bviral0", "Before", ifelse(A_pureeffect$variable=="bviral1", "After", "Washout"))
+
+BAC_effect <- virals_blood_long[(virals_blood_long$period1=="Gel B"&virals_blood_long$period2=="Pill A"&virals_blood_long$variable %in% c("bviral2", "bviral3", "bviral4")),]
+BAC_effect$group = "BA"
+BAC_effect <- BAC_effect[,-c(2,3,4)]
+BAC_effect$variable <- ifelse(BAC_effect$variable=="bviral2", "Before", ifelse(BAC_effect$variable=="bviral3", "After", "Washout"))
+
+CBA_effect <- virals_blood_long[(virals_blood_long$period2=="Gel B"&virals_blood_long$period3=="Pill A"&virals_blood_long$variable %in% c("bviral4", "bviral5", "bviral6")),]
+CBA_effect$group = "BA"
+CBA_effect <- CBA_effect[,-c(2,3,4)]
+CBA_effect$variable <- ifelse(CBA_effect$variable=="bviral4", "Before", ifelse(CBA_effect$variable=="bviral5", "After", "Washout"))
+
+CAB_effect <- virals_blood_long[(virals_blood_long$period1=="Gel C"&virals_blood_long$period2=="Pill A"&virals_blood_long$variable %in% c("bviral2", "bviral3", "bviral4")),]
+CAB_effect$group = "CA"
+CAB_effect <- CAB_effect[,-c(2,3,4)]
+CAB_effect$variable <- ifelse((CAB_effect$variable=="bviral2"), "Before", ifelse(CAB_effect$variable=="bviral3", "After", "Washout"))
+
+BCA_effect <- virals_blood_long[(virals_blood_long$period2=="Gel C"&virals_blood_long$period3=="Pill A"&virals_blood_long$variable %in% c("bviral4", "bviral5", "bviral6")),]
+BCA_effect$group = "CA"
+BCA_effect <- BCA_effect[,-c(2,3,4)]
+BCA_effect$variable <- ifelse((BCA_effect$variable=="bviral4"), "Before", ifelse(BCA_effect$variable=="bviral5", "After", "Washout"))
+
+Aeffect <- rbind(A_pureeffect,BAC_effect,CBA_effect, BCA_effect, CAB_effect)
+#### B effect
+B_pureeffect <- virals_blood_long[virals_blood_long$period1=="Gel B"&virals_blood_long$variable %in% c("bviral0", "bviral1", "bviral2"),]
+B_pureeffect$group = "B"
+B_pureeffect <- B_pureeffect[, -c(2,3,4)]
+B_pureeffect$variable <- ifelse(B_pureeffect$variable=="bviral0", "Before", ifelse(B_pureeffect$variable=="bviral1", "After", "Washout"))
+
+ABC_effect <- virals_blood_long[(virals_blood_long$period1=="Pill A"&virals_blood_long$period2=="Gel B"&virals_blood_long$variable %in% c("bviral2", "bviral3", "bviral4")),]
+ABC_effect$group = "AB"
+ABC_effect <- ABC_effect[,-c(2,3,4)]
+ABC_effect$variable <- ifelse(ABC_effect$variable=="bviral2", "Before", ifelse(ABC_effect$variable=="bviral3", "After", "Washout"))
+
+CAB_effect <- virals_blood_long[(virals_blood_long$period2=="Pill A"&virals_blood_long$period3=="Gel B"&virals_blood_long$variable %in% c("bviral4", "bviral5", "bviral6")),]
+CAB_effect$group = "AB"
+CAB_effect <- CAB_effect[,-c(2,3,4)]
+CAB_effect$variable <- ifelse(CAB_effect$variable=="bviral4", "Before", ifelse(CAB_effect$variable=="bviral5", "After", "Washout"))
+
+CBA_effect <- virals_blood_long[(virals_blood_long$period1=="Gel C"&virals_blood_long$period2=="Gel B"&virals_blood_long$variable %in% c("bviral2", "bviral3", "bviral4")),]
+CBA_effect$group = "CB"
+CBA_effect <- CBA_effect[,-c(2,3,4)]
+CBA_effect$variable <- ifelse((CBA_effect$variable=="bviral2"), "Before", ifelse(CBA_effect$variable=="bviral3", "After", "Washout"))
+
+ACB_effect <- virals_blood_long[(virals_blood_long$period2=="Gel C"&virals_blood_long$period3=="Gel B"&virals_blood_long$variable %in% c("bviral4", "bviral5", "bviral6")),]
+ACB_effect$group = "CB"
+ACB_effect <- ACB_effect[,-c(2,3,4)]
+ACB_effect$variable <- ifelse((ACB_effect$variable=="bviral4"), "Before", ifelse(ACB_effect$variable=="bviral5", "After", "Washout"))
+
+Beffect <- rbind(B_pureeffect,ABC_effect,CAB_effect, CBA_effect, ACB_effect)
+
+#### C effect
+C_pureeffect <- virals_blood_long[virals_blood_long$period1=="Gel C"&virals_blood_long$variable %in% c("bviral0", "bviral1", "bviral2"),]
+C_pureeffect$group = "C"
+C_pureeffect <- C_pureeffect[, -c(2,3,4)]
+C_pureeffect$variable <- ifelse(C_pureeffect$variable=="bviral0", "Before", ifelse(C_pureeffect$variable=="bviral1", "After", "Washout"))
+
+ACB_effect <- virals_blood_long[(virals_blood_long$period1=="Pill A"&virals_blood_long$period2=="Gel C"&virals_blood_long$variable %in% c("bviral2", "bviral3", "bviral4")),]
+ACB_effect$group = "AC"
+ACB_effect <- ACB_effect[,-c(2,3,4)]
+ACB_effect$variable <- ifelse(ACB_effect$variable=="bviral2", "Before", ifelse(ACB_effect$variable=="bviral3", "After", "Washout"))
+
+BAC_effect <- virals_blood_long[(virals_blood_long$period2=="Pill A"&virals_blood_long$period3=="Gel C"&virals_blood_long$variable %in% c("bviral4", "bviral5", "bviral6")),]
+BAC_effect$group = "AC"
+BAC_effect <- BAC_effect[,-c(2,3,4)]
+BAC_effect$variable <- ifelse(BAC_effect$variable=="bviral4", "Before", ifelse(BAC_effect$variable=="bviral5", "After", "Washout"))
+
+BCA_effect <- virals_blood_long[(virals_blood_long$period1=="Gel B"&virals_blood_long$period2=="Gel C"&virals_blood_long$variable %in% c("bviral2", "bviral3", "bviral4")),]
+BCA_effect$group = "BC"
+BCA_effect <- BCA_effect[,-c(2,3,4)]
+BCA_effect$variable <- ifelse((BCA_effect$variable=="bviral2"), "Before", ifelse(BCA_effect$variable=="bviral3", "After", "Washout"))
+
+ABC_effect <- virals_blood_long[(virals_blood_long$period2=="Gel B"&virals_blood_long$period3=="Gel C"&virals_blood_long$variable %in% c("bviral4", "bviral5", "bviral6")),]
+ABC_effect$group = "BC"
+ABC_effect <- ABC_effect[,-c(2,3,4)]
+ABC_effect$variable <- ifelse((ABC_effect$variable=="bviral4"), "Before", ifelse(ABC_effect$variable=="bviral5", "After", "Washout"))
+
+Ceffect <- rbind(C_pureeffect,ACB_effect,BAC_effect, BCA_effect, ABC_effect)
+```
+
+```{r}
+#### A
+mean_table = tapply(Aeffect$value, 
+                    list(Aeffect$group, Aeffect$variable), 
+                    mean, 
+                    na.rm = T)
+mean_table <- mean_table[,c(2,1,3)]
+bviral_mean <- mean_table
+
+mycol = c("blue3", "cyan4", "gold3")
+par(mfrow=c(1,3))
+
+plot(1:3, c(0,65,130),
+     ylab = "Mean of virals concentration", xlab = "", 
+     pch = " ", cex.lab = 1, cex.axis = 1 ,
+     mgp = c(2.5, 1, 0), axes=FALSE, main = "Pill A")
+
+axis(side=1, 1:3, c("Before","After", "Washout"))
+axis(side=2, at=seq(0,130, by=10))
+box()
+for (i in 1:3) {
+  lines(1:3, mean_table[i, ], lty = 2, col = mycol[i], lwd = 3)
+}
+legend(2, 130, legend = c("A", "B+A", "C+A"), bty = "n", 
+       col = mycol, lwd = 2, ncol = 1, cex = 1)
+
+#### B
+mean_table = tapply(Beffect$value, 
+                    list(Beffect$group, Beffect$variable), 
+                    mean, 
+                    na.rm = T)
+mean_table <- mean_table[,c(2,1,3)]
+mean_table <- mean_table[c(2,1,3),]
+bviral_mean <- rbind(bviral_mean, mean_table)
+
+plot(1:3, c(0,65,130),
+     ylab = "Mean of virals concentration", xlab = "", 
+     pch = " ", cex.lab = 1, cex.axis = 1 ,
+     mgp = c(2.5, 1, 0), axes=FALSE, main = "Gel B")
+axis(side=1, 1:3, c("Before","After", "Washout"))
+axis(side=2, at=seq(0,130, by=10))
+box()
+for (i in 1:3) {
+  lines(1:3, mean_table[i, ], lty = 2, col = mycol[i], lwd = 3)
+}
+legend(2, 130, legend = c("B", "A+B", "C+B"), bty = "n", 
+       col = mycol, lwd = 2, ncol = 1, cex = 1)
+
+#### C
+mean_table = tapply(Ceffect$value, 
+                    list(Ceffect$group, Ceffect$variable), 
+                    mean, 
+                    na.rm = T)
+mean_table <- mean_table[,c(2,1,3)]
+mean_table <- mean_table[c(3,1,2),]
+bviral_mean <- rbind(bviral_mean, mean_table)
+
+plot(1:3, c(0,65,130),
+     ylab = "Mean of virals concentration", xlab = "", 
+     pch = " ", cex.lab = 1, cex.axis = 1 ,
+     mgp = c(2.5, 1, 0), axes=FALSE, main = "Gel C")
+axis(side=1, 1:3, c("Before","After", "Washout"))
+axis(side=2, at=seq(0,130, by=10))
+box()
+for (i in 1:3) {
+  lines(1:3, mean_table[i, ], lty = 2, col = mycol[i], lwd = 3)
+}
+legend(2, 130, legend = c("C", "A+C", "B+C"), bty = "n", 
+       col = mycol, lwd = 2, ncol = 1, cex = 1)
+mtext("Longitudinal means of blood virals", side = 3, line = -1.3, outer = TRUE)
+
+kableExtra::kable(bviral_mean)
+
+```
+
+```{r}
+### viral loads in the affected skin
+#### A effect
+virals_skin_long = melt(virals, id.var = c("ptid", "period1", "period2", "period3"), measure.vars = c("sviral0", "sviral1", "sviral2", "sviral3", "sviral4", "sviral5", "sviral6"))
+
+A_pureeffect <- virals_skin_long[virals_skin_long$period1=="Pill A"&virals_skin_long$variable %in% c("sviral0", "sviral1", "sviral2"),]
+A_pureeffect$group = "A"
+A_pureeffect <- A_pureeffect[, -c(2,3,4)]
+A_pureeffect$variable <- ifelse(A_pureeffect$variable=="sviral0", "Before", ifelse(A_pureeffect$variable=="sviral1", "After", "Washout"))
+
+BAC_effect <- virals_skin_long[(virals_skin_long$period1=="Gel B"&virals_skin_long$period2=="Pill A"&virals_skin_long$variable %in% c("sviral2", "sviral3", "sviral4")),]
+BAC_effect$group = "BA"
+BAC_effect <- BAC_effect[,-c(2,3,4)]
+BAC_effect$variable <- ifelse(BAC_effect$variable=="sviral2", "Before", ifelse(BAC_effect$variable=="sviral3", "After", "Washout"))
+
+CBA_effect <- virals_skin_long[(virals_skin_long$period2=="Gel B"&virals_skin_long$period3=="Pill A"&virals_skin_long$variable %in% c("sviral4", "sviral5", "sviral6")),]
+CBA_effect$group = "BA"
+CBA_effect <- CBA_effect[,-c(2,3,4)]
+CBA_effect$variable <- ifelse(CBA_effect$variable=="sviral4", "Before", ifelse(CBA_effect$variable=="sviral5", "After", "Washout"))
+
+CAB_effect <- virals_skin_long[(virals_skin_long$period1=="Gel C"&virals_skin_long$period2=="Pill A"&virals_skin_long$variable %in% c("sviral2", "sviral3", "sviral4")),]
+CAB_effect$group = "CA"
+CAB_effect <- CAB_effect[,-c(2,3,4)]
+CAB_effect$variable <- ifelse((CAB_effect$variable=="sviral2"), "Before", ifelse(CAB_effect$variable=="sviral3", "After", "Washout"))
+
+BCA_effect <- virals_skin_long[(virals_skin_long$period2=="Gel C"&virals_skin_long$period3=="Pill A"&virals_skin_long$variable %in% c("sviral4", "sviral5", "sviral6")),]
+BCA_effect$group = "CA"
+BCA_effect <- BCA_effect[,-c(2,3,4)]
+BCA_effect$variable <- ifelse((BCA_effect$variable=="sviral4"), "Before", ifelse(BCA_effect$variable=="sviral5", "After", "Washout"))
+
+Aeffect <- rbind(A_pureeffect,BAC_effect,CBA_effect, BCA_effect, CAB_effect)
+#### B effect
+B_pureeffect <- virals_skin_long[virals_skin_long$period1=="Gel B"&virals_skin_long$variable %in% c("sviral0", "sviral1", "sviral2"),]
+B_pureeffect$group = "B"
+B_pureeffect <- B_pureeffect[, -c(2,3,4)]
+B_pureeffect$variable <- ifelse(B_pureeffect$variable=="sviral0", "Before", ifelse(B_pureeffect$variable=="sviral1", "After", "Washout"))
+
+ABC_effect <- virals_skin_long[(virals_skin_long$period1=="Pill A"&virals_skin_long$period2=="Gel B"&virals_skin_long$variable %in% c("sviral2", "sviral3", "sviral4")),]
+ABC_effect$group = "AB"
+ABC_effect <- ABC_effect[,-c(2,3,4)]
+ABC_effect$variable <- ifelse(ABC_effect$variable=="sviral2", "Before", ifelse(ABC_effect$variable=="sviral3", "After", "Washout"))
+
+CAB_effect <- virals_skin_long[(virals_skin_long$period2=="Pill A"&virals_skin_long$period3=="Gel B"&virals_skin_long$variable %in% c("sviral4", "sviral5", "sviral6")),]
+CAB_effect$group = "AB"
+CAB_effect <- CAB_effect[,-c(2,3,4)]
+CAB_effect$variable <- ifelse(CAB_effect$variable=="sviral4", "Before", ifelse(CAB_effect$variable=="sviral5", "After", "Washout"))
+
+CBA_effect <- virals_skin_long[(virals_skin_long$period1=="Gel C"&virals_skin_long$period2=="Gel B"&virals_skin_long$variable %in% c("sviral2", "sviral3", "sviral4")),]
+CBA_effect$group = "CB"
+CBA_effect <- CBA_effect[,-c(2,3,4)]
+CBA_effect$variable <- ifelse((CBA_effect$variable=="sviral2"), "Before", ifelse(CBA_effect$variable=="sviral3", "After", "Washout"))
+
+ACB_effect <- virals_skin_long[(virals_skin_long$period2=="Gel C"&virals_skin_long$period3=="Gel B"&virals_skin_long$variable %in% c("sviral4", "sviral5", "sviral6")),]
+ACB_effect$group = "CB"
+ACB_effect <- ACB_effect[,-c(2,3,4)]
+ACB_effect$variable <- ifelse((ACB_effect$variable=="sviral4"), "Before", ifelse(ACB_effect$variable=="sviral5", "After", "Washout"))
+
+Beffect <- rbind(B_pureeffect,ABC_effect,CAB_effect, CBA_effect, ACB_effect)
+
+#### C effect
+C_pureeffect <- virals_skin_long[virals_skin_long$period1=="Gel C"&virals_skin_long$variable %in% c("sviral0", "sviral1", "sviral2"),]
+C_pureeffect$group = "C"
+C_pureeffect <- C_pureeffect[, -c(2,3,4)]
+C_pureeffect$variable <- ifelse(C_pureeffect$variable=="sviral0", "Before", ifelse(C_pureeffect$variable=="sviral1", "After", "Washout"))
+
+ACB_effect <- virals_skin_long[(virals_skin_long$period1=="Pill A"&virals_skin_long$period2=="Gel C"&virals_skin_long$variable %in% c("sviral2", "sviral3", "sviral4")),]
+ACB_effect$group = "AC"
+ACB_effect <- ACB_effect[,-c(2,3,4)]
+ACB_effect$variable <- ifelse(ACB_effect$variable=="sviral2", "Before", ifelse(ACB_effect$variable=="sviral3", "After", "Washout"))
+
+BAC_effect <- virals_skin_long[(virals_skin_long$period2=="Pill A"&virals_skin_long$period3=="Gel C"&virals_skin_long$variable %in% c("sviral4", "sviral5", "sviral6")),]
+BAC_effect$group = "AC"
+BAC_effect <- BAC_effect[,-c(2,3,4)]
+BAC_effect$variable <- ifelse(BAC_effect$variable=="sviral4", "Before", ifelse(BAC_effect$variable=="sviral5", "After", "Washout"))
+
+BCA_effect <- virals_skin_long[(virals_skin_long$period1=="Gel B"&virals_skin_long$period2=="Gel C"&virals_skin_long$variable %in% c("sviral2", "sviral3", "sviral4")),]
+BCA_effect$group = "BC"
+BCA_effect <- BCA_effect[,-c(2,3,4)]
+BCA_effect$variable <- ifelse((BCA_effect$variable=="sviral2"), "Before", ifelse(BCA_effect$variable=="sviral3", "After", "Washout"))
+
+ABC_effect <- virals_skin_long[(virals_skin_long$period2=="Gel B"&virals_skin_long$period3=="Gel C"&virals_skin_long$variable %in% c("sviral4", "sviral5", "sviral6")),]
+ABC_effect$group = "BC"
+ABC_effect <- ABC_effect[,-c(2,3,4)]
+ABC_effect$variable <- ifelse((ABC_effect$variable=="sviral4"), "Before", ifelse(ABC_effect$variable=="sviral5", "After", "Washout"))
+
+Ceffect <- rbind(C_pureeffect,ACB_effect,BAC_effect, BCA_effect, ABC_effect)
+```
+
+```{r}
+#### A
+mean_table = tapply(Aeffect$value, 
+                    list(Aeffect$group, Aeffect$variable), 
+                    mean, 
+                    na.rm = T)
+mean_table <- mean_table[,c(2,1,3)]
+sviral_mean <- mean_table
+
+mycol = c("blue3", "cyan4", "gold3")
+par(mfrow=c(1,3))
+plot(1:3, c(0,120,240),
+     ylab = "Mean of virals concentration", xlab = "", 
+     pch = " ", cex.lab = 1, cex.axis = 1 ,
+     mgp = c(2.5, 1, 0), axes=FALSE, main = "Pill A")
+axis(side=1, 1:3, c("Before","After", "Washout"))
+axis(side=2, at=seq(0,240, by=20))
+box()
+for (i in 1:3) {
+  lines(1:3, mean_table[i, ], lty = 2, col = mycol[i], lwd = 3)
+}
+legend(2, 240, legend = c("A", "B+A", "C+A"), bty = "n", 
+       col = mycol, lwd = 2, ncol = 1, cex = 1)
+
+#### B
+mean_table = tapply(Beffect$value, 
+                    list(Beffect$group, Beffect$variable), 
+                    mean, 
+                    na.rm = T)
+mean_table <- mean_table[,c(2,1,3)]
+mean_table <- mean_table[c(2,1,3),]
+sviral_mean <- rbind(sviral_mean, mean_table)
+
+
+plot(1:3, c(0,120,240),
+     ylab = "Mean of virals concentration", xlab = "", 
+     pch = " ", cex.lab = 1, cex.axis = 1 ,
+     mgp = c(2.5, 1, 0), axes=FALSE, main = "Gel B")
+axis(side=1, 1:3, c("Before","After", "Washout"))
+axis(side=2, at=seq(0,240, by=20))
+box()
+for (i in 1:3) {
+  lines(1:3, mean_table[i, ], lty = 2, col = mycol[i], lwd = 3)
+}
+legend(2, 240, legend = c("B", "A+B", "C+B"), bty = "n", 
+       col = mycol, lwd = 2, ncol = 1, cex = 1)
+
+#### C
+mean_table = tapply(Ceffect$value, 
+                    list(Ceffect$group, Ceffect$variable), 
+                    mean, 
+                    na.rm = T)
+mean_table <- mean_table[,c(2,1,3)]
+mean_table <- mean_table[c(3,1,2),]
+sviral_mean <- rbind(sviral_mean, mean_table)
+
+plot(1:3, c(0,120,240),
+     ylab = "Mean of virals concentration", xlab = "", 
+     pch = " ", cex.lab = 1, cex.axis = 1 ,
+     mgp = c(2.5, 1, 0), axes=FALSE, main = "Gel C")
+axis(side=1, 1:3, c("Before","After", "Washout"))
+axis(side=2, at=seq(0,240, by=20))
+box()
+for (i in 1:3) {
+  lines(1:3, mean_table[i, ], lty = 2, col = mycol[i], lwd = 3)
+}
+legend(2, 240, legend = c("C", "A+C", "B+C"), bty = "n", 
+       col = mycol, lwd = 2, ncol = 1, cex = 1)
+mtext("Longitudinal means of skin virals", side = 3, line = -1.3, outer = TRUE)
+
+kableExtra::kable(sviral_mean)
+
+```
+
+```{r}
+### adverse event EDA
+adverse <- endpoints[,c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16)]
+adverse$period1_count <- adverse$AE_pillA_week1+adverse$AE_pillA_week2+adverse$AE_pillA_week3+adverse$AE_pillA_week4
+adverse$period2_count <- adverse$AE_gelB_week1+adverse$AE_gelB_week2+adverse$AE_gelB_week3+adverse$AE_gelB_week4
+adverse$period3_count <- adverse$AE_gelC_week1+adverse$AE_gelC_week2+adverse$AE_gelC_week3+adverse$AE_gelC_week4
+adverse<-adverse[,-c(5,6,7,8,9,10,11,12,13,14,15,16)]
+
+adverse_long = melt(adverse, id.var = c("ptid", "period1", "period2", "period3"), measure.vars = c("period1_count", "period2_count", "period3_count"))
+
+adverse$A_count=adverse$B_count=adverse$C_count=0
+for (i in 1:180){
+  if (adverse$period1[i]=="Pill A") adverse$A_count[i]=adverse$period1_count[i]
+  if (adverse$period2[i]=="Pill A") adverse$A_count[i]=adverse$period2_count[i]
+  if (adverse$period3[i]=="Pill A") adverse$A_count[i]=adverse$period3_count[i]
+  
+  if (adverse$period1[i]=="Gel B") adverse$B_count[i]=adverse$period1_count[i]
+  if (adverse$period2[i]=="Gel B") adverse$B_count[i]=adverse$period2_count[i]
+  if (adverse$period3[i]=="Gel B") adverse$B_count[i]=adverse$period3_count[i]
+  
+  if (adverse$period1[i]=="Gel C") adverse$C_count[i]=adverse$period1_count[i]
+  if (adverse$period2[i]=="Gel C") adverse$C_count[i]=adverse$period2_count[i]
+  if (adverse$period3[i]=="Gel C") adverse$C_count[i]=adverse$period3_count[i]
+}
+countdata <- adverse[,c(10,9,8)]
+
+A=as.data.frame(countdata[,1])
+colnames(A)<-"count"
+B=as.data.frame(countdata[,2])
+colnames(B)<-"count"
+C=as.data.frame(countdata[,3])
+colnames(C)<-"count"
+newdata <- rbind(A,B,C)
+newdata$group = 0
+for (i in 1:540){
+  if (i<=180) newdata$group[i]="Pill A"
+  else if (i<=360) newdata$group[i]="Gel B"
+  else newdata$group[i]="Gel C"
+}
+library(ggplot2)
+# Histogram by group in ggplot2
+ggplot(newdata, aes(x = count, fill = group)) + 
+  geom_histogram(binwidth = 0.5, color = "black", alpha = 0.7)+
+  labs(x = "Factor Levels", y = "Frequency", title = "Histogram of adverse event total count")
+```
+
+```{r}
+### adherence days
+adhere <- endpoints[,c(1,2,3,4,17,18,19,20,21,22,23,24,25,26,27,28)]
+adhere.melt <- melt(adhere, id.vars = c("ptid", "period1", "period2", "period3"))
+
+temp=data.frame(rep(0,2160))
+colnames(temp)<-"group"
+temp$count=NA
+for (i in 1:180){
+  temp$group[c(12*i-11,12*i-10,12*i-9,12*i-8)]=adhere$period1[i]
+  temp$count[c(12*i-11,12*i-10,12*i-9,12*i-8)]=as.vector(adhere[i,5:8])
+  
+  temp$group[c(12*i-7,12*i-6,12*i-5,12*i-4)]=adhere$period2[i]
+  temp$count[c(12*i-7,12*i-6,12*i-5,12*i-4)]=as.vector(adhere[i,9:12])
+  
+  temp$group[c(12*i-3,12*i-2,12*i-1,12*i)]=adhere$period3[i]
+  temp$count[c(12*i-3,12*i-2,12*i-1,12*i)]=as.vector(adhere[i,13:16])
+}
+temp$count <- as.numeric(temp$count)
+
+ggplot(temp, aes(x = count, fill=group)) + 
+  geom_histogram(binwidth = 0.5, color = "black", alpha = 0.7)+
+  labs(x = "Adherence days per week", y = "Frequency", title = "Histogram of adherence count")
+```
+```{r}
+endpoints$age = virals$age
+endpoints$gender = virals$gender
+endpoints$race = virals$race
+endpoints$period1.adverse = as.numeric((endpoints$AE_pillA_week1 + endpoints$AE_pillA_week2 + endpoints$AE_pillA_week3 + endpoints$AE_pillA_week4) != 0)
+endpoints$period2.adverse = as.numeric((endpoints$AE_gelB_week1 + endpoints$AE_gelB_week2 + endpoints$AE_gelB_week3 + endpoints$AE_gelB_week4) != 0)
+endpoints$period3.adverse = as.numeric((endpoints$AE_gelC_week1 + endpoints$AE_gelC_week2 + endpoints$AE_gelC_week3 + endpoints$AE_gelC_week4) != 0)
+
+```
+
+```{r}
+obj1 <- endpoints[, c(1:4, 29:34)]
+
+temp1 <-
+  melt(
+    obj1,
+    id.vars = c("ptid", "age", "race", "gender"),
+    measure.vars = c("period1", "period2", "period3")
+  )
+temp2 <-
+  melt(
+    obj1,
+    id.vars = c("ptid", "age", "race", "gender"),
+    measure.vars = c("period1.adverse", "period2.adverse", "period3.adverse")
+  )
+colnm <- colnames(temp1)
+colnm[c(5, 6)] <- c("Period", "Treatment")
+colnames(temp1) <- colnm
+
+temp1$y <- temp2$value
+obj1 <- temp1
+obj1$Treatment <- as.character(obj1$Treatment)
+obj1$Treatment <-
+  substr(obj1$Treatment, nchar(obj1$Treatment), nchar(obj1$Treatment))
+
+obj1 <- obj1 %>% arrange(ptid, Period)
+carryover <-
+  createCarry(
+    data = obj1,
+    treatment = "Treatment",
+    id = "ptid",
+    period = "Period",
+    carrySimple = TRUE
+  )
+obj1 <- carryover$data
+write.csv(obj1, "I.csv")
+```
+
+```{r}
+### adverse event (GEE model)
+obj1 <- read.csv("I.csv")[,-1]
+mod1.1 <-
+  CrossGEE(
+    response = "y",
+    covar = c("age", "gender", "race"),
+    period = "Period",
+    treatment = "Treatment",
+    id = "ptid",
+    carry = carryover$carryover,
+    family = binomial(),
+    correlation = "independence",
+    data = carryover$data
+  )
+QIC1 <- mod1.1$QIC
+            
+mod1.2 <-
+  CrossGEE(
+    response = "y",
+    covar = c("age", "gender", "race"),
+    period = "Period",
+    treatment = "Treatment",
+    id = "ptid",
+    carry = carryover$carryover,
+    family = binomial(),
+    correlation = "exchangeable",
+    data = carryover$data
+  )
+QIC2 <- mod1.2$QIC
+
+mod1.3 <-
+  CrossGEE(
+    response = "y",
+    covar = c("age", "gender", "race"),
+    period = "Period",
+    treatment = "Treatment",
+    id = "ptid",
+    carry = carryover$carryover,
+    family = binomial(),
+    correlation = "ar1",
+    data = carryover$data
+  )
+QIC3 <- mod1.3$QIC
+
+kableExtra::kable(round(cbind(QIC1, QIC2, QIC3), 2), align = c("c", "c", "c", "c", "c", "c"),
+      caption = "QIC table")
+## mod1.1 will be the best model
+summary(mod1.1$model)
+#model1.glmm <- glmer(y ~ age + gender + race + Treatment + Period  + Carry_B + Carry_C + (1|ptid), data = obj1, family = binomial)
+#summary(model1.glmm)
+######## haven't decided to use gee/glmm
+```
+
+```{r, #data}
+endpoints$period1.adherence = as.numeric((endpoints$Adhere_pillA_week1 + endpoints$Adhere_pillA_week2 + endpoints$Adhere_pillA_week3 + endpoints$Adhere_pillA_week4))
+endpoints$period2.adherence = as.numeric((endpoints$Adhere_gelB_week1 + endpoints$Adhere_gelB_week2 + endpoints$Adhere_gelB_week3 + endpoints$Adhere_gelB_week4))
+endpoints$period3.adherence = as.numeric((endpoints$Adhere_gelC_week1 + endpoints$Adhere_gelC_week2 + endpoints$Adhere_gelC_week3 + endpoints$Adhere_gelC_week4))
+
+obj2 <- endpoints[,c(1:4,17:31)]
+temp1 <- melt(obj2, id.vars = c("ptid", "age", "race", "gender"), measure.vars = c("period1", "period2", "period3"))
+temp2 <- melt(obj2, id.vars = c("ptid", "age", "race", "gender"), measure.vars = colnames(obj2)[5:16])
+temp2$Period=NA    
+temp2$Treatment=NA
+colnm <- colnames(temp1)
+colnm[c(5,6)] <- c("Period", "Treatment")
+colnames(temp1) <- colnm
+
+df = temp2
+df[rownames(df)[1:720],"Period"]="Period1"
+df[rownames(df)[721:1440],"Period"]="Period2"
+df[rownames(df)[1441:2160],"Period"]="Period3"
+df[rownames(df)[1:720],"Treatment"]=rep(temp1$Treatment[1:180],4)
+df[rownames(df)[721:1440],"Treatment"]=rep(temp1$Treatment[181:360],4)
+df[rownames(df)[1441:2160],"Treatment"]=rep(temp1$Treatment[361:540],4)
+
+colnames(df)[c(5,6)]<-c("Week","y")
+df$Week <- as.character(df$Week)
+df$Week <-substr(df$Week, nchar(df$Week), nchar(df$Week))
+df$Week <- as.numeric(df$Week)
+df$Period <- as.factor(df$Period)
+df$Treatment <- as.character(df$Treatment)
+df$Treatment <- as.factor(substr(df$Treatment, nchar(df$Treatment), nchar(df$Treatment)))
+df$Treatment <- relevel(df$Treatment, ref = "B")
+df$ptid <- as.numeric(df$ptid)
+
+
+carryover2<-createCarry(data=df, treatment="Treatment",id="ptid", period ="Period",carrySimple=TRUE)
+colnames(carryover2$data)[c(5,9,10)] <- c("Time", "Carry_C", "Carry_A")
+
+df <- carryover2$data
+write.csv(df, "II.csv")
+###########CrossCarry Package: has some questions
+#model2<-CrossGEEKron(response="y",covar=c("age", "gender", "race"),period="Period", treatment="Treatment",id="ptid", time="Time",carry=c("Carry_C", "Carry_A"), family=gaussian(),correlation="ar1",data=df)
+#summary(model2$model)
+```
+
+```{r}
+### adherence profile (GLMM model)
+df <- read.csv("II.csv")[,-1]
+plot(df$y ~ as.numeric(df$Time))
+
+mod2.0 <- glm(cbind(y, 7-y) ~ 1, family = binomial, data = df)
+n <- nrow(df)
+r221 <- as.numeric(1 - exp(-2 / n * (logLik(mod2.1) - logLik(mod2.0))))
+
+mod2.1 <- glm(cbind(y, 7-y) ~ age + gender + race + Period + Time + Treatment + Carry_C + Carry_A, 
+            family = binomial, data = df)
+res2.1 <- summary(mod2.1)$coef
+aicbic2.1 <- c(AIC(mod2.1), BIC(mod2.1))
+
+
+mod2.2<- glmer(cbind(y, 7-y) ~  Period + Time + Treatment + Carry_C + Carry_A + (1|ptid), data = df, family = binomial, nAGQ = 5)
+res2.2 <- summary(mod2.2)$coef
+aicbic2.2 <- c(AIC(mod2.2), BIC(mod2.2))
+n <- nrow(df)
+r222 <- as.numeric(1 - exp(-2 / n * (logLik(mod2.2) - logLik(mod2.0))))
+
+mod2.3<- glmer(cbind(y, 7-y) ~ age + gender + race + Period + Time + Treatment + Carry_C + Carry_A + (1 + Time |ptid), data = df, family = binomial)
+
+res2.3 <- summary(mod2.3)$coef
+aicbic2.3 <- c(AIC(mod2.3), BIC(mod2.3))
+n <- nrow(df)
+r223 <- as.numeric(1 - exp(-2 / n * (logLik(mod2.3) - logLik(mod2.0))))
+
+compare.matrix <- cbind(rbind(aicbic2.1, aicbic2.2, aicbic2.3), rbind(r221, r222, r223))
+colnames(compare.matrix) <- c("AIC", "BIC", "R square")
+rownames(compare.matrix) <- c("ModelA", "ModelB", "ModelC")
+table <- kableExtra::kable(compare.matrix, align = c("c", "c", "c"),
+               caption = "Model Comparison")
+table
+## mod2.2 is the best
+finmod <- mod2.2
+beta_est <- summary(finmod)$coef[, 1]
+beta_var <- summary(finmod)$vcov
+fin_tbl <- round(cbind(beta_est, 
+                 beta_est - 1.96 * sqrt(diag(beta_var)), 
+                 beta_est + 1.96 * sqrt(diag(beta_var))), digits = 3)
+colnames(fin_tbl) <- c("Est", "95% CI LB", "95% CI UB")
+kableExtra::kable(round(fin_tbl, 3), align = c("c", "c", "c"),
+      caption = "Summary table")
+### to see which contains 0 thus is insignificant
+
+fin_tbl_exp <- round(cbind(exp(beta_est), 
+                 exp(beta_est - 1.96 * sqrt(diag(beta_var))), 
+                 exp(beta_est + 1.96 * sqrt(diag(beta_var)))), digits = 3)
+colnames(fin_tbl_exp) <- c("Est", "95% CI LB", "95% CI UB")
+kableExtra::kable(round(fin_tbl_exp, 3), align = c("c", "c", "c"),
+      caption = "Summary table (exponentialized)")
+```
+
+```{r}
+### PK (Lmm model)
+obj3 <- read.csv("III.csv")[,-1]
+obj3$Period <- as.factor(obj3$Period)
+obj3$Treatment <- as.factor(obj3$Treatment)
+obj3$Pos <- as.factor(obj3$Pos)
+
+metrics=matrix(NA,3,3) 
+
+mod3.1 = lm(y ~ age + gender + race + Pos + Treatment + Period + Carry_B + Carry_C + Adhere + Adverse, data = obj3)
+result_summary = generate_result_summary(mod3.1, "lm", obj3)
+kableExtra::kable(data.frame(cbind(result_summary$res_table,p_value=round(result_summary$sand_coef_test$p_t,3))))
+metrics[,1]=result_summary$metrics
+
+mod3.2<- lmer(y ~ age + gender + race + Pos + Treatment + Period + Carry_B + Carry_C + Adhere + Adverse + (1|ptid), data = obj3)
+result_summary = generate_result_summary(mod3.2, "lmm", obj3)
+kableExtra::kable(data.frame(cbind(result_summary$res_table,p_value=round(result_summary$sand_coef_test$p_t,3))))
+metrics[,2]=result_summary$metrics
+
+mod3.3<- lmer(y ~ age + gender + race + Pos + Treatment + Period + Carry_B + Carry_C + Adhere + Adverse + (1 + Pos |ptid), data = obj3)
+result_summary = generate_result_summary(mod3.3, "lmm", obj3)
+kableExtra::kable(data.frame(cbind(result_summary$res_table,p_value=round(result_summary$sand_coef_test$p_t,3))))
+metrics[,3]=result_summary$metrics
+
+metrics=data.frame("Model 1"=metrics[,1], "Model 2"=metrics[,2], "Model 3"=metrics[,3],row.names = c("AIC","BIC","R2"))
+kableExtra::kable(metrics)
+### mod3.2 will be the best
+#kableExtra::kable(Anova(mod3.2, type="III",test="F"))
+# refactor (A as reference)
+result_summary = generate_result_summary(mod3.2, "lmm", obj3)
+kableExtra::kable(result_summary)
+
+```
+
+
+```{r}
+### 
+Adhere.demo <-
+  virals %>% 
+  select(ptid, age, gender, race)
+
+endpoints.Adhere.total <- 
+  endpoints.Adhere.sum %>% 
+  select(ptid, Adhere_sum) %>% 
+  group_by(ptid) %>% 
+  summarize(Adhere_total = sum(Adhere_sum))
+
+Adhere.demo <- left_join(Adhere.demo, endpoints.Adhere.total) %>% 
+  mutate(non_Adhere_total = 84 - Adhere_total)
+
+model.demo <- glm(cbind(Adhere_total, non_Adhere_total) ~ age*gender* race, data = Adhere.demo, family = binomial)
+
+summary(model.demo)
+```
+

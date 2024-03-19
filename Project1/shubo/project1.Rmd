@@ -22,8 +22,8 @@ library(gtsummary)
 library(sandwich)
 library(clubSandwich)
 library(lmtest)
-virals <- read.csv("baseline.csv")
-endpoints <- read.csv("endpoints.csv")
+virals <- read.csv("../baseline.csv")
+endpoints <- read.csv("../endpoints.csv")
 ```
 
 ```{r}
@@ -742,7 +742,7 @@ obj3.2 <- obj3[obj3$Pos=="skin",-7]
 mod3.1.1 = lm(y ~ age + gender + race + Treatment + Period + Carry_B + Carry_C + Adhere + Adverse,
             data = obj3.1)
 result_summary = generate_result_summary(mod3.1.1, "lm", obj3.1)
-#kableExtra::kable(data.frame(cbind(result_summary$res_table,p_value=round(result_summary$sand_coef_test$p_t,3))))
+kableExtra::kable(data.frame(cbind(result_summary$res_table,p_value=round(result_summary$sand_coef_test$p_t,3))))
 metrics[, 1] = result_summary$metrics
 
 mod3.1.2 <-
@@ -785,7 +785,7 @@ result$sig = ifelse(result$p_value > 0.05,
                     ))
 result <- result[,-4]
 colnames(result) <- c("", "Estimate", "SE", "p_value", "sig")
-#kableExtra::kable(result)
+kableExtra::kable(result)
 
 mod3.2.1 = lm(y ~ age + gender + race + Treatment + Period + Carry_B + Carry_C + Adhere + Adverse,
             data = obj3.2)

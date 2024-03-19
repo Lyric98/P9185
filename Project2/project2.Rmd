@@ -1,0 +1,40 @@
+---
+title: "Project2"
+output: html_document
+date: "2024-03-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library("mice")
+library("lattice")
+library("survival")
+library("visdat")
+
+```
+
+EDA
+
+```{r }
+# read the data
+data <- read.csv("data.csv")
+
+# check the structure of the data
+str(data)
+ 
+set.seed(123)
+
+
+
+
+# impute the missing values
+
+
+
+# check the missing values
+md.pattern(data)
+
+#visualize the missing values
+vis_miss(data)
+```

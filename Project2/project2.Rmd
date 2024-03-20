@@ -36,11 +36,34 @@ unique_Subject_ID <- data[!duplicated(data$Subject_ID),]
 # dim of unique_Subject_ID
 dim(unique_Subject_ID)
 table(unique_Subject_ID$Treatment_Group)
-# distributions of MEM Comp stratified by Treatment and Day
-xyplot(MEM_comp ~ day | Treatment_Group, data = data, type = c("p", "g"), layout = c(3, 1))
+# distributions of MEM Comp stratified by Treatment and Day (facet grid (prob density)
+eda1 <- ggplot(data, aes(x=MEM_comp, fill=Treatment_Group)) + 
+  geom_density(alpha=0.5) + 
+  facet_grid(Treatment_Group ~ day) + 
+  labs(title="Distributions of MEM Comp stratified by Treatment and Day", x="MEM Comp", y="Density")
 
-# facet grid (prob density)
-ggplot(data, aes(x = MEM_comp|day, fill = Treatment_Group)) +
-  geom_density(alpha = 0.5) +
-  facet_grid(Treatment_Group  ~ .)
+# Spaghetti plot for longitudinal trajectory
+eda2 <- ggplot(data, aes(x=day, y=MEM_comp, group=Subject_ID, color=Treatment_Group)) + 
+  geom_line() + 
+  geom_point() +
+  # sqrt x scale
+  scale_x_sqrt() +
+  facet_grid(.~ Treatment_Group)+
+  labs(x="Day", y="MEM Comp") +
+  theme(legend.position="bottom")
+
+  
+
+
+
+
+full_day <- rep(c(0, 5, 19, 90), length(unique(data$Subject_ID)))
+# unique_Subject_ID$Subject_ID repeat 4 times, join with full_day
+full_id <- rep(unique_Subject_ID$Subject_ID, each=4)
+full_id <- data.frame(cbind(full_id, full_day))
+colnames(full_id) <- c("Subject_ID", "day")
+full_data <- data %>% merge(full_id, by=c("Subject_ID", "day"), all=TRUE)
+
+
+
 ```

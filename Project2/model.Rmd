@@ -161,18 +161,6 @@ densityplot(imp.all[[5]], lwd = 3)
 
 
 
-```{r fit model}
-# fit model to each imputed datasets
-# pool coef estimates and standard errors to create 95% CIs
-# sensitivity analysis for each data missing assumptions
-# mcar - fit data with completers data
-
-
-
-```
-
-
-
 
 
 

@@ -1,0 +1,95 @@
+---
+title: "model.rmd"
+author: "Yanran Li, Yijin Wang, Shubo Zhang"
+date: "2024-03-20"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(mice)
+library(tidyr)
+library(dplyr)
+```
+
+```{r}
+data <- read.csv("data.csv") %>%
+  janitor::clean_names()
+```
+
+```{r}
+# pre-processing: expand design matrix and fill in NAs
+full_data <- data %>%
+  complete(day,
+           nesting(subject_id, treatment_group)) %>%
+  relocate(day, .after = subject_id) %>%
+  relocate(treatment_group, .after = gender) %>%
+  group_by(subject_id) %>% 
+  fill(age, gender, .direction = "downup") %>%
+  arrange(subject_id, day)
+```
+
+```{r}
+# assume MAR
+# multiple imputations 
+imputed_data <- mice::mice(data = full_data, m = 6, seed =2024, print = FALSE)
+imputed_data
+# used pmm method
+```
+```{r}
+# check convergence
+plot(imputed_data)
+```
+```{r}
+# check if imputed data makes sense (ie. in a reasonable bound)
+# red is imputed, blue is observed
+mice::stripplot(imputed_data, mem_comp)
+```
+
+
+```{r}
+# fit model to each imputed datasets
+```
+
+```{r}
+# pool coef estimates and standard errors to create 95% CIs
+```
+
+```{r}
+# sensitivity analysis for each data missing assumptions
+# mcar - fit data with completers data
+```
+
+```{r}
+# mnar - fill na's with different delta --> fit model --> CI's
+
+# Create a delta vector that represent the following adjustment values for mmHg: 0 for MAR, and -0.7, -0.2, 0.2, and 0.7 for MNAR.
+delta <- c(0, -0.7, -0.2, 0.2, 0.7 )
+
+imp.all <- vector("list", length(delta))
+post <- imputed_data$post
+for (i in 1:length(delta)){
+  d <- delta[i]
+  cmd <- paste("imp[[j]][,i] <- imp[[j]][,i] +", d)
+  post["mem_comp"] <- cmd
+  imp <- mice::mice(full_data, post = post,seed = i, print = FALSE)
+  imp.all[[i]] <- imp
+}
+```
+
+```{r}
+# imputation with no adjustment (delta = 0)
+densityplot(imp.all[[1]], lwd = 3)
+```
+
+```{r}
+# imputation with adjustment (delta = -0.7)
+densityplot(imp.all[[2]], lwd = 3)
+```
+```{r}
+# imputation with adjustment (delta = 0.7)
+densityplot(imp.all[[5]], lwd = 3)
+```

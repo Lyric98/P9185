@@ -11,7 +11,7 @@ library("mice")
 library("lattice")
 library("survival")
 library("visdat")
-
+library("ggplot2")
 ```
 
 EDA
@@ -26,15 +26,21 @@ str(data)
 set.seed(123)
 
 
+# check unique values
+unique(data$Treatment_Group)
+table(data$Subject_ID) 
+length(unique(data$Subject_ID))
 
+# check table with unique Subject_ID
+unique_Subject_ID <- data[!duplicated(data$Subject_ID),]
+# dim of unique_Subject_ID
+dim(unique_Subject_ID)
+table(unique_Subject_ID$Treatment_Group)
+# distributions of MEM Comp stratified by Treatment and Day
+xyplot(MEM_comp ~ day | Treatment_Group, data = data, type = c("p", "g"), layout = c(3, 1))
 
-# impute the missing values
-
-
-
-# check the missing values
-md.pattern(data)
-
-#visualize the missing values
-vis_miss(data)
+# facet grid (prob density)
+ggplot(data, aes(x = MEM_comp|day, fill = Treatment_Group)) +
+  geom_density(alpha = 0.5) +
+  facet_grid(Treatment_Group  ~ .)
 ```

@@ -13,6 +13,9 @@ knitr::opts_chunk$set(echo = TRUE)
 library(mice)
 library(tidyr)
 library(dplyr)
+library(visdat)
+library(naniar)
+library(ggplot2)
 ```
 
 ```{r}
@@ -31,6 +34,39 @@ full_data <- data %>%
   fill(age, gender, .direction = "downup") %>%
   arrange(subject_id, day)
 ```
+
+```{r}
+vis_miss(full_data)
+```
+
+
+```{r}
+vis_miss(full_data,facet = day)
+
+gg_miss_var(full_data,
+            facet = day)
+```
+
+```{r}
+full_data %>% filter(is.na(mem_comp)) %>%
+  ggplot(aes(x=as.factor(day)))+
+  geom_boxplot(aes(y=age))+
+  theme_bw()+
+  xlab("day")+
+  ggtitle("Relationship of age and missing values")
+```
+
+
+```{r}
+full_data %>% filter(is.na(mem_comp)) %>%
+  ggplot()+
+  geom_bar(aes(x=gender, stat = "count"))+
+  facet_wrap(day~.)+
+  theme_bw()+
+  xlab("gender")+
+  ggtitle("Relationship of gender and missing values")
+```
+
 
 ```{r}
 # assume MAR

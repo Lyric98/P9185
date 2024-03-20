@@ -124,7 +124,22 @@ all.equal(as.numeric(diag(t)), pool.fit$pooled$t) # check
 ```{r}
 # sensitivity analysis for each data missing assumptions
 # mcar - fit data with completers data
+completers_data <- full_data %>%
+  group_by(subject_id) %>%
+  mutate(missing = any(is.na(mem_comp))) %>%
+  ungroup()
+completers_fit <- lmer(mem_comp ~ age + gender + treatment_group+day +treatment_group:day + (1|subject_id), data = completers_data %>% filter(missing == FALSE))
+summary(completers_fit)
 ```
+
+```{r}
+vcov(completers_fit)
+```
+
+```{r}
+# calculate CIs
+```
+
 
 ```{r}
 # mnar - fill na's with different delta --> fit model --> CI's
@@ -138,7 +153,7 @@ for (i in 1:length(delta)){
   d <- delta[i]
   cmd <- paste("imp[[j]][,i] <- imp[[j]][,i] +", d)
   post["mem_comp"] <- cmd
-  imp <- mice::mice(full_data, post = post,seed = i, print = FALSE)
+  imp <- mice::mice(full_data, post = post,m = 6,seed = i, print = FALSE)
   imp.all[[i]] <- imp
 }
 ```
@@ -153,13 +168,19 @@ densityplot(imp.all[[1]], lwd = 3)
 densityplot(imp.all[[2]], lwd = 3)
 ```
 ```{r}
-# imputation with adjustment (delta = 0.7)
-densityplot(imp.all[[5]], lwd = 3)
+# imputation with adjustment (delta = -0.2)
+densityplot(imp.all[[3]], lwd = 3)
 ```
 
 
-
-
+```{r}
+# imputation with adjustment (delta = 0.2)
+densityplot(imp.all[[4]], lwd = 3)
+```
+```{r}
+# imputation with adjustment (delta = 0.7)
+densityplot(imp.all[[5]], lwd = 3)
+```
 
 ```{r fit model}
 # fit model to each imputed datasets

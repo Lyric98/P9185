@@ -16,11 +16,14 @@ library(dplyr)
 library(visdat)
 library(naniar)
 library(ggplot2)
+library(lme4)
+library(broom.mixed)
 ```
 
 ```{r}
 data <- read.csv("data.csv") %>%
-  janitor::clean_names()
+  janitor::clean_names() %>%
+  mutate(day = as.factor(day))
 ```
 
 ```{r}
@@ -88,10 +91,34 @@ mice::stripplot(imputed_data, mem_comp)
 
 ```{r}
 # fit model to each imputed datasets
+
+
+model <- with(imputed_data, lmer(mem_comp ~ age + gender + treatment_group+day  + +treatment_group:day + (1|subject_id)))
+
+pool.fit <- pool(model)
+
+summary(pool.fit)
+
+# check the pooled model covariance
+# get the full matrix ubar (instead of only the diagonal)
+m <- pool.fit$m
+ubar <- Reduce("+", lapply(model$analyses, vcov)) / (m)
+b <- pool.fit$pooled$b # this one is still provided by mice
+
+# # or by hand as well
+# qbar <- getqbar(fil.pooled)  # pooled estimates  
+# b <- 1 / (m-1) * rowSums((sapply(fit.mi$analyses, coef) - qbar)^2)
+
+t <- ubar + (1 + 1 / (m)) * b  # this is t as it used to be
+
+# check versus the diagonal of t that is still provided
+all.equal(as.numeric(diag(t)), pool.fit$pooled$t) # check
+
 ```
 
 ```{r}
 # pool coef estimates and standard errors to create 95% CIs
+
 ```
 
 ```{r}
@@ -129,3 +156,24 @@ densityplot(imp.all[[2]], lwd = 3)
 # imputation with adjustment (delta = 0.7)
 densityplot(imp.all[[5]], lwd = 3)
 ```
+
+
+
+
+
+```{r fit model}
+# fit model to each imputed datasets
+# pool coef estimates and standard errors to create 95% CIs
+# sensitivity analysis for each data missing assumptions
+# mcar - fit data with completers data
+
+
+
+```
+
+
+
+
+
+
+

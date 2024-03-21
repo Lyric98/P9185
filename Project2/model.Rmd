@@ -117,6 +117,27 @@ all.equal(as.numeric(diag(t)), pool.fit$pooled$t) # check
 ```
 
 ```{r}
+
+smy<-summary(pool.fit)
+# Hypothesis test to see whether treatment effects at day 5, 19, and 90 are significant
+
+output <- data.frame(
+  Estimate = round(c(smy$estimate[c(6:8, 9, 11, 13, 10, 12, 14)], smy$estimate[6]+smy$estimate[9], smy$estimate[7]+smy$estimate[11], smy$estimate[8]+smy$estimate[13], smy$estimate[6]+smy$estimate[10], smy$estimate[7]+smy$estimate[12], smy$estimate[8]+smy$estimate[14]),3),
+  `Standard error` = round(c(smy$std.error[c(6:8, 9, 11, 13, 10, 12, 14)], sqrt((t[6,6]) + (t[9,9]) + 2*t[6,9]), sqrt((t[7,7]) + (t[11,11]) + 2*t[7,11]), sqrt((t[8,8]) + (t[13,13]) + 2*t[8,13]), sqrt((t[6,6]) + (t[10,10]) + 2*t[6,10]), sqrt((t[7,7]) + (t[12,12]) + 2*t[7,12]), sqrt((t[8,8]) + (t[14,14]) + 2*t[8,14])),3),
+  `95% CI` = rep(NA,15)
+)
+colnames(output)[c(2,3)] <- c("Standard error", "95% CI")
+output$`95% CI` <- paste0( "(", as.character(round(output$Estimate - 1.96*output$`Standard error`, 3)), ",", as.character(round(output$Estimate + 1.96*output$`Standard error`, 3)), ")")
+output$Significance <- ifelse((output$Estimate - 1.96*output$`Standard error`) * (output$Estimate + 1.96*output$`Standard error`)<0, "FALSE", "TRUE")
+rownames(output) <- c("$\\beta_5$", "$\\beta_6$", "$\\beta_7$", "$\\beta_8$", "$\\beta_9$", "$\\beta_{10}$", "$\\beta_{11}$", "$\\beta_{12}$", "$\\beta_{13}$", "$\\beta_5+\\beta_8$", "$\\beta_6+\\beta_9$", "$\\beta_7+\\beta_{10}$", "$\\beta_5+\\beta_{11}$", "$\\beta_6+\\beta_{12}$","$\\beta_7+\\beta_{13}$")
+
+# Print the table using kable
+knitr::kable(output,caption = "Summary table")
+
+```
+
+
+```{r}
 # pool coef estimates and standard errors to create 95% CIs
 
 ```

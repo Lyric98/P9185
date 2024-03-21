@@ -39,14 +39,14 @@ full_data <- data %>%
 ```
 
 ```{r}
-vis_miss(full_data)
+vis_miss <- vis_miss(full_data)
 ```
 
 
 ```{r}
-vis_miss(full_data,facet = day)
+vis_miss_facet <- vis_miss(full_data,facet = day)
 
-gg_miss_var(full_data,
+gg_miss_var <- gg_miss_var(full_data,
             facet = day)
 ```
 

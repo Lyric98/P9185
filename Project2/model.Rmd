@@ -70,7 +70,6 @@ full_data %>% filter(is.na(mem_comp)) %>%
   ggtitle("Relationship of gender and missing values")
 ```
 
-
 ```{r}
 # assume MAR
 # multiple imputations 
@@ -80,12 +79,15 @@ imputed_data
 ```
 ```{r}
 # check convergence
-plot(imputed_data)
+convergence <- plot(imputed_data)
+convergence
 ```
+
 ```{r}
 # check if imputed data makes sense (ie. in a reasonable bound)
 # red is imputed, blue is observed
-mice::stripplot(imputed_data, mem_comp)
+stripplot <- mice::stripplot(imputed_data, mem_comp)
+stripplot
 ```
 
 

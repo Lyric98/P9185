@@ -9,7 +9,7 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r}
+```{r,message=FALSE,warning=FALSE}
 library(mice)
 library(tidyr)
 library(dplyr)
@@ -19,12 +19,14 @@ library(ggplot2)
 library(lme4)
 library(broom.mixed)
 library(kableExtra)
+library(gtsummary)
 ```
 
 ```{r}
 data <- read.csv("data.csv") %>%
   janitor::clean_names() %>%
-  mutate(day = as.factor(day))
+  mutate(day = as.factor(day),
+         treatment_group = as.factor(treatment_group))
 ```
 
 ```{r}
@@ -36,9 +38,23 @@ full_data <- data %>%
   relocate(treatment_group, .after = gender) %>%
   group_by(subject_id) %>% 
   fill(age, gender, .direction = "downup") %>%
-  arrange(subject_id, day)
+  arrange(subject_id, day) %>%
+  group_by(subject_id) %>%
+  # calculate difference
+  mutate(diff_mem_comp = mem_comp - first(mem_comp)) %>%
+  filter(day != 0) %>%
+  select(-mem_comp) %>%
+  ungroup()
 ```
 
+```{r}
+full_data %>%
+  group_by(day) %>%
+  summarise(`Missing Data Percentage` = sum(is.na(diff_mem_comp))/n()*100) %>% 
+  rename(Day= day) %>%
+  kable()
+
+```
 ```{r}
 vis_miss <- vis_miss(full_data)
 ```
@@ -52,7 +68,7 @@ gg_miss_var <- gg_miss_var(full_data,
 ```
 
 ```{r}
-full_data %>% filter(is.na(mem_comp)) %>%
+full_data %>% filter(is.na(diff_mem_comp)) %>%
   ggplot(aes(x=as.factor(day)))+
   geom_boxplot(aes(y=age))+
   theme_bw()+
@@ -62,7 +78,7 @@ full_data %>% filter(is.na(mem_comp)) %>%
 
 
 ```{r}
-full_data %>% filter(is.na(mem_comp)) %>%
+full_data %>% filter(is.na(diff_mem_comp)) %>%
   ggplot()+
   geom_bar(aes(x=gender, stat = "count"))+
   facet_wrap(day~.)+
@@ -72,116 +88,138 @@ full_data %>% filter(is.na(mem_comp)) %>%
 ```
 
 ```{r}
-# assume MAR
-# multiple imputations 
-imputed_data <- mice::mice(data = full_data, m = 6, seed =2024, print = FALSE)
-imputed_data
-# used pmm method
+# Rigorous test for MCAR: Little's Test.
+# H0: data is MCAR
+# HA: data is not MCAR ==> MAR or MNAR
+# reject H0 in this case
+mcar_test(full_data)
 ```
-```{r}
-# check convergence
-convergence <- plot(imputed_data)
-convergence
-```
-
-```{r}
-# check if imputed data makes sense (ie. in a reasonable bound)
-# red is imputed, blue is observed
-stripplot <- mice::stripplot(imputed_data, mem_comp)
-stripplot
+```{r,echo=FALSE}
+# # assume MAR
+# # multiple imputations 
+# imputed_data <- mice::mice(data = full_data, m = 6, seed =2024, print = FALSE)
+# imputed_data
+# # used pmm method
 ```
 
+```{r,echo=FALSE}
+# # check convergence
+# convergence <- plot(imputed_data)
+# convergence
+```
+
+```{r,echo=FALSE}
+# # check if imputed data makes sense (ie. in a reasonable bound)
+# # red is imputed, blue is observed
+# stripplot <- mice::stripplot(imputed_data, mem_comp)
+# stripplot
+```
 
 ```{r}
-temp <- data %>% 
-  group_by(subject_id) %>%
-  mutate(mem_diff = mem_comp - mem_comp[1])
-temp <- temp %>%
-  select(-mem_comp) %>%
-  slice(2:n())
-temp$gender <- as.factor(temp$gender)
-temp$treatment_group <- as.factor(temp$treatment_group)
+mar_data <- full_data %>%
+      filter(!is.na(diff_mem_comp)) %>%
+  mutate(day = factor(day,levels = c(5,19,90)),
+         treatment_group = factor(treatment_group,levels = c("A","B","C")))
+```
 
-model <- with(temp, lmer(mem_diff ~ age + gender + treatment_group+day + (1|subject_id)))
+```{r}
+# MAR assumption model
+trt_model <- with(mar_data, lmer(diff_mem_comp ~ age + gender + treatment_group+day + (1|subject_id)))
 
 ## Aim 1: test separately for two treatment effect
 
-summary_output <- summary(model)
+summary_output <- summary(trt_model)
 coef_table <- as.data.frame(summary_output$coefficients)
-df <- df.residual(model)
+df <- df.residual(trt_model)
 p_values <- 2 * pt(abs(coef_table[, "t value"]), df = df, lower.tail = FALSE)
 coef_table$p_value <- p_values
-print(coef_table)
+coef_table %>% kable(caption = "Under MAR Assumption Model Summary Table")
 
 ## Aim 2: jointly test interaction terms
-model <- with(temp, lmer(mem_diff ~ age + gender + treatment_group+day  +treatment_group:day + (1|subject_id)))
-car::Anova(model, type= "III")
+full_model <- with(mar_data, lmer(diff_mem_comp ~ age + gender + treatment_group+day  +treatment_group:day + (1|subject_id),REML=FALSE))
+car::Anova(full_model, type= "III") %>% kable(caption="Type III Anova Test")
+```
+```{r}
+trt_model_table <- 
+  trt_model %>% 
+  tbl_regression(
+    estimate_fun = function(x) style_number(x, digits = 3), 
+    exponentiate = F,
+    label = list(
+      age ~ "Age",
+      gender ~ "Gender",
+      treatment_group ~ "Treatment",
+      day ~ "Day"
+    ))
+
+gt.trt_model_table <- trt_model_table %>% as_gt() 
+gt::gtsave(gt.trt_model_table, file = "./pic/tbl_MAR_trt_model_table.png")
 ```
 
-```{r}
-calc_pooled_covar<- function(pool.fit,model){
-  # check the pooled model covariance
-  # get the full matrix ubar (instead of only the diagonal)
-  m <- pool.fit$m
-  ubar <- Reduce("+", lapply(model$analyses, vcov)) / (m)
-  b <- pool.fit$pooled$b # this one is still provided by mice
-
-  # # or by hand as well
-  # qbar <- getqbar(fil.pooled)  # pooled estimates  
-  # b <- 1 / (m-1) * rowSums((sapply(fit.mi$analyses, coef) - qbar)^2)
-
-  t <- ubar + (1 + 1 / (m)) * b  # this is t as it used to be
-
-  # check versus the diagonal of t that is still provided
-  check = all.equal(as.numeric(diag(t)), pool.fit$pooled$t) # check
-  if (check) {
-    return(t)
-  } else{
-    stop("error!!!!!!!")
-  }
-}
+```{r,echo=FALSE}
+# calc_pooled_covar<- function(pool.fit,model){
+#   # check the pooled model covariance
+#   # get the full matrix ubar (instead of only the diagonal)
+#   m <- pool.fit$m
+#   ubar <- Reduce("+", lapply(model$analyses, vcov)) / (m)
+#   b <- pool.fit$pooled$b # this one is still provided by mice
+# 
+#   # # or by hand as well
+#   # qbar <- getqbar(fil.pooled)  # pooled estimates  
+#   # b <- 1 / (m-1) * rowSums((sapply(fit.mi$analyses, coef) - qbar)^2)
+# 
+#   t <- ubar + (1 + 1 / (m)) * b  # this is t as it used to be
+# 
+#   # check versus the diagonal of t that is still provided
+#   check = all.equal(as.numeric(diag(t)), pool.fit$pooled$t) # check
+#   if (check) {
+#     return(t)
+#   } else{
+#     stop("error!!!!!!!")
+#   }
+# }
 ```
 
-```{r}
-
-smy<-summary(pool.fit)
-# Hypothesis test to see whether treatment effects at day 5, 19, and 90 are significant
-
-output <- data.frame(
-  Estimate = round(c(smy$estimate[c(6:8, 9, 11, 13, 10, 12, 14)], smy$estimate[6]+smy$estimate[9], smy$estimate[7]+smy$estimate[11], smy$estimate[8]+smy$estimate[13], smy$estimate[6]+smy$estimate[10], smy$estimate[7]+smy$estimate[12], smy$estimate[8]+smy$estimate[14]),3),
-  `Standard error` = round(c(smy$std.error[c(6:8, 9, 11, 13, 10, 12, 14)], sqrt((t[6,6]) + (t[9,9]) + 2*t[6,9]), sqrt((t[7,7]) + (t[11,11]) + 2*t[7,11]), sqrt((t[8,8]) + (t[13,13]) + 2*t[8,13]), sqrt((t[6,6]) + (t[10,10]) + 2*t[6,10]), sqrt((t[7,7]) + (t[12,12]) + 2*t[7,12]), sqrt((t[8,8]) + (t[14,14]) + 2*t[8,14])),3),
-  `95% CI` = rep(NA,15)
-)
-colnames(output)[c(2,3)] <- c("Standard error", "95% CI")
-output$`95% CI` <- paste0( "(", as.character(round(output$Estimate - 1.96*output$`Standard error`, 3)), ",", as.character(round(output$Estimate + 1.96*output$`Standard error`, 3)), ")")
-output$Significance <- ifelse((output$Estimate - 1.96*output$`Standard error`) * (output$Estimate + 1.96*output$`Standard error`)<0, "FALSE", "TRUE")
-rownames(output) <- c("$\\beta_5$", "$\\beta_6$", "$\\beta_7$", "$\\beta_8$", "$\\beta_9$", "$\\beta_{10}$", "$\\beta_{11}$", "$\\beta_{12}$", "$\\beta_{13}$", "$\\beta_5+\\beta_8$", "$\\beta_6+\\beta_9$", "$\\beta_7+\\beta_{10}$", "$\\beta_5+\\beta_{11}$", "$\\beta_6+\\beta_{12}$","$\\beta_7+\\beta_{13}$")
-
-# Print the table using kable
-knitr::kable(output,caption = "Summary table")
+```{r,echo=FALSE}
+# 
+# smy<-summary(pool.fit)
+# # Hypothesis test to see whether treatment effects at day 5, 19, and 90 are significant
+# 
+# output <- data.frame(
+#   Estimate = round(c(smy$estimate[c(6:8, 9, 11, 13, 10, 12, 14)], smy$estimate[6]+smy$estimate[9], smy$estimate[7]+smy$estimate[11], smy$estimate[8]+smy$estimate[13], smy$estimate[6]+smy$estimate[10], smy$estimate[7]+smy$estimate[12], smy$estimate[8]+smy$estimate[14]),3),
+#   `Standard error` = round(c(smy$std.error[c(6:8, 9, 11, 13, 10, 12, 14)], sqrt((t[6,6]) + (t[9,9]) + 2*t[6,9]), sqrt((t[7,7]) + (t[11,11]) + 2*t[7,11]), sqrt((t[8,8]) + (t[13,13]) + 2*t[8,13]), sqrt((t[6,6]) + (t[10,10]) + 2*t[6,10]), sqrt((t[7,7]) + (t[12,12]) + 2*t[7,12]), sqrt((t[8,8]) + (t[14,14]) + 2*t[8,14])),3),
+#   `95% CI` = rep(NA,15)
+# )
+# colnames(output)[c(2,3)] <- c("Standard error", "95% CI")
+# output$`95% CI` <- paste0( "(", as.character(round(output$Estimate - 1.96*output$`Standard error`, 3)), ",", as.character(round(output$Estimate + 1.96*output$`Standard error`, 3)), ")")
+# output$Significance <- ifelse((output$Estimate - 1.96*output$`Standard error`) * (output$Estimate + 1.96*output$`Standard error`)<0, "FALSE", "TRUE")
+# rownames(output) <- c("$\\beta_5$", "$\\beta_6$", "$\\beta_7$", "$\\beta_8$", "$\\beta_9$", "$\\beta_{10}$", "$\\beta_{11}$", "$\\beta_{12}$", "$\\beta_{13}$", "$\\beta_5+\\beta_8$", "$\\beta_6+\\beta_9$", "$\\beta_7+\\beta_{10}$", "$\\beta_5+\\beta_{11}$", "$\\beta_6+\\beta_{12}$","$\\beta_7+\\beta_{13}$")
+# 
+# # Print the table using kable
+# knitr::kable(output,caption = "Summary table")
 
 ```
 
 
-```{r}
-# pool coef estimates and standard errors to create 95% CIs
-pool_coef_ci_table <- function(pool.fit, t, caption){
-  smy<-summary(pool.fit)
-# Hypothesis test to see whether treatment effects at day 5, 19, and 90 are significant
-
-output <- data.frame(
-  Estimate = round(c(smy$estimate[c(6:8, 9, 11, 13, 10, 12, 14)], smy$estimate[6]+smy$estimate[9], smy$estimate[7]+smy$estimate[11], smy$estimate[8]+smy$estimate[13], smy$estimate[6]+smy$estimate[10], smy$estimate[7]+smy$estimate[12], smy$estimate[8]+smy$estimate[14]),3),
-  `Standard error` = round(c(smy$std.error[c(6:8, 9, 11, 13, 10, 12, 14)], sqrt((t[6,6]) + (t[9,9]) + 2*t[6,9]), sqrt((t[7,7]) + (t[11,11]) + 2*t[7,11]), sqrt((t[8,8]) + (t[13,13]) + 2*t[8,13]), sqrt((t[6,6]) + (t[10,10]) + 2*t[6,10]), sqrt((t[7,7]) + (t[12,12]) + 2*t[7,12]), sqrt((t[8,8]) + (t[14,14]) + 2*t[8,14])),3),
-  `95% CI` = rep(NA,15)
-)
-colnames(output)[c(2,3)] <- c("Standard error", "95% CI")
-output$`95% CI` <- paste0( "(", as.character(round(output$Estimate - 1.96*output$`Standard error`, 3)), ",", as.character(round(output$Estimate + 1.96*output$`Standard error`, 3)), ")")
-output$Significance <- ifelse((output$Estimate - 1.96*output$`Standard error`) * (output$Estimate + 1.96*output$`Standard error`)<0, "FALSE", "TRUE")
-rownames(output) <- c("$\\beta_5$", "$\\beta_6$", "$\\beta_7$", "$\\beta_8$", "$\\beta_9$", "$\\beta_{10}$", "$\\beta_{11}$", "$\\beta_{12}$", "$\\beta_{13}$", "$\\beta_5+\\beta_8$", "$\\beta_6+\\beta_9$", "$\\beta_7+\\beta_{10}$", "$\\beta_5+\\beta_{11}$", "$\\beta_6+\\beta_{12}$","$\\beta_7+\\beta_{13}$")
-
-# Print the table using kable
-return (knitr::kable(output,caption = caption,escape = TRUE))
-}
+```{r,echo=FALSE}
+# # pool coef estimates and standard errors to create 95% CIs
+# pool_coef_ci_table <- function(pool.fit, t, caption){
+#   smy<-summary(pool.fit)
+# # Hypothesis test to see whether treatment effects at day 5, 19, and 90 are significant
+# 
+# output <- data.frame(
+#   Estimate = round(c(smy$estimate[c(6:8, 9, 11, 13, 10, 12, 14)], smy$estimate[6]+smy$estimate[9], smy$estimate[7]+smy$estimate[11], smy$estimate[8]+smy$estimate[13], smy$estimate[6]+smy$estimate[10], smy$estimate[7]+smy$estimate[12], smy$estimate[8]+smy$estimate[14]),3),
+#   `Standard error` = round(c(smy$std.error[c(6:8, 9, 11, 13, 10, 12, 14)], sqrt((t[6,6]) + (t[9,9]) + 2*t[6,9]), sqrt((t[7,7]) + (t[11,11]) + 2*t[7,11]), sqrt((t[8,8]) + (t[13,13]) + 2*t[8,13]), sqrt((t[6,6]) + (t[10,10]) + 2*t[6,10]), sqrt((t[7,7]) + (t[12,12]) + 2*t[7,12]), sqrt((t[8,8]) + (t[14,14]) + 2*t[8,14])),3),
+#   `95% CI` = rep(NA,15)
+# )
+# colnames(output)[c(2,3)] <- c("Standard error", "95% CI")
+# output$`95% CI` <- paste0( "(", as.character(round(output$Estimate - 1.96*output$`Standard error`, 3)), ",", as.character(round(output$Estimate + 1.96*output$`Standard error`, 3)), ")")
+# output$Significance <- ifelse((output$Estimate - 1.96*output$`Standard error`) * (output$Estimate + 1.96*output$`Standard error`)<0, "FALSE", "TRUE")
+# rownames(output) <- c("$\\beta_5$", "$\\beta_6$", "$\\beta_7$", "$\\beta_8$", "$\\beta_9$", "$\\beta_{10}$", "$\\beta_{11}$", "$\\beta_{12}$", "$\\beta_{13}$", "$\\beta_5+\\beta_8$", "$\\beta_6+\\beta_9$", "$\\beta_7+\\beta_{10}$", "$\\beta_5+\\beta_{11}$", "$\\beta_6+\\beta_{12}$","$\\beta_7+\\beta_{13}$")
+# 
+# # Print the table using kable
+# return (knitr::kable(output,caption = caption,escape = TRUE))
+# }
 ```
 
 ```{r}
@@ -189,100 +227,152 @@ return (knitr::kable(output,caption = caption,escape = TRUE))
 # mcar - fit data with completers data
 completers_data <- full_data %>%
   group_by(subject_id) %>%
-  mutate(missing = any(is.na(mem_comp))) %>%
-  ungroup()
-completers_fit <- lmer(mem_comp ~ age + gender + treatment_group+day +treatment_group:day + (1|subject_id), data = completers_data %>% filter(missing == FALSE))
-summary(completers_fit)
+  mutate(missing = any(is.na(diff_mem_comp))) %>%
+  ungroup() %>%
+  filter(missing == FALSE)
+
+completers_trt_model <- with(completers_data, lmer(diff_mem_comp ~ age + gender + treatment_group+day + (1|subject_id)))
+
+## Aim 1: test separately for two treatment effect
+
+summary_output <- summary(completers_trt_model)
+coef_table <- as.data.frame(summary_output$coefficients)
+df <- df.residual(completers_trt_model)
+p_values <- 2 * pt(abs(coef_table[, "t value"]), df = df, lower.tail = FALSE)
+coef_table$p_value <- p_values
+coef_table %>% kable(caption = "Completers' Data Model Summary Table")
+
+## Aim 2: jointly test interaction terms
+completers_full_model <- with(completers_data, lmer(diff_mem_comp ~ age + gender + treatment_group+day  +treatment_group:day + (1|subject_id),REML=FALSE))
+car::Anova(full_model, type= "III") %>% kable(caption="Type III Anova Test")
 ```
 
 ```{r}
-t <-vcov(completers_fit)
+completers_trt_model_table <- 
+  completers_trt_model %>% 
+  tbl_regression(
+    estimate_fun = function(x) style_number(x, digits = 3), 
+    exponentiate = F,
+    label = list(
+      age ~ "Age",
+      gender ~ "Gender",
+      treatment_group ~ "Treatment",
+      day ~ "Day"
+    ))
+
+gt.completers_trt_model_table <- completers_trt_model_table %>% as_gt() 
+gt::gtsave(gt.completers_trt_model_table, file = "./pic/tbl_completers_trt_model_table.png")
 ```
 
-```{r}
-completers_fit_se <- summary(completers_fit)[["coefficients"]][,2]
-# calculate CIs
-output <- data.frame(
-  Estimate = round(c(completers_fit@beta[c(6:8, 9, 11, 13, 10, 12, 14)], completers_fit@beta[6]+completers_fit@beta[9], completers_fit@beta[7]+completers_fit@beta[11], completers_fit@beta[8]+completers_fit@beta[13], completers_fit@beta[6]+completers_fit@beta[10], completers_fit@beta[7]+completers_fit@beta[12], completers_fit@beta[8]+completers_fit@beta[14]),3),
-  `Standard error` = round(c(completers_fit_se[c(6:8, 9, 11, 13, 10, 12, 14)], sqrt((t[6,6]) + (t[9,9]) + 2*t[6,9]), sqrt((t[7,7]) + (t[11,11]) + 2*t[7,11]), sqrt((t[8,8]) + (t[13,13]) + 2*t[8,13]), sqrt((t[6,6]) + (t[10,10]) + 2*t[6,10]), sqrt((t[7,7]) + (t[12,12]) + 2*t[7,12]), sqrt((t[8,8]) + (t[14,14]) + 2*t[8,14])),3),
-  `95% CI` = rep(NA,15)
-)
-colnames(output)[c(2,3)] <- c("Standard error", "95% CI")
-output$`95% CI` <- paste0( "(", as.character(round(output$Estimate - 1.96*output$`Standard error`, 3)), ",", as.character(round(output$Estimate + 1.96*output$`Standard error`, 3)), ")")
-output$Significance <- ifelse((output$Estimate - 1.96*output$`Standard error`) * (output$Estimate + 1.96*output$`Standard error`)<0, "FALSE", "TRUE")
-rownames(output) <- c("$\\beta_5$", "$\\beta_6$", "$\\beta_7$", "$\\beta_8$", "$\\beta_9$", "$\\beta_{10}$", "$\\beta_{11}$", "$\\beta_{12}$", "$\\beta_{13}$", "$\\beta_5+\\beta_8$", "$\\beta_6+\\beta_9$", "$\\beta_7+\\beta_{10}$", "$\\beta_5+\\beta_{11}$", "$\\beta_6+\\beta_{12}$","$\\beta_7+\\beta_{13}$")
+```{r,echo=FALSE}
+#t <-vcov(completers_trt_model)
+```
 
-# Print the table using kable
-knitr::kable(output,caption = "Completers' Model Summary table")
+```{r,echo=FALSE}
+# completers_fit_se <- summary(completers_fit)[["coefficients"]][,2]
+# # calculate CIs
+# output <- data.frame(
+#   Estimate = round(c(completers_fit@beta[c(6:8, 9, 11, 13, 10, 12, 14)], completers_fit@beta[6]+completers_fit@beta[9], completers_fit@beta[7]+completers_fit@beta[11], completers_fit@beta[8]+completers_fit@beta[13], completers_fit@beta[6]+completers_fit@beta[10], completers_fit@beta[7]+completers_fit@beta[12], completers_fit@beta[8]+completers_fit@beta[14]),3),
+#   `Standard error` = round(c(completers_fit_se[c(6:8, 9, 11, 13, 10, 12, 14)], sqrt((t[6,6]) + (t[9,9]) + 2*t[6,9]), sqrt((t[7,7]) + (t[11,11]) + 2*t[7,11]), sqrt((t[8,8]) + (t[13,13]) + 2*t[8,13]), sqrt((t[6,6]) + (t[10,10]) + 2*t[6,10]), sqrt((t[7,7]) + (t[12,12]) + 2*t[7,12]), sqrt((t[8,8]) + (t[14,14]) + 2*t[8,14])),3),
+#   `95% CI` = rep(NA,15)
+# )
+# colnames(output)[c(2,3)] <- c("Standard error", "95% CI")
+# output$`95% CI` <- paste0( "(", as.character(round(output$Estimate - 1.96*output$`Standard error`, 3)), ",", as.character(round(output$Estimate + 1.96*output$`Standard error`, 3)), ")")
+# output$Significance <- ifelse((output$Estimate - 1.96*output$`Standard error`) * (output$Estimate + 1.96*output$`Standard error`)<0, "FALSE", "TRUE")
+# rownames(output) <- c("$\\beta_5$", "$\\beta_6$", "$\\beta_7$", "$\\beta_8$", "$\\beta_9$", "$\\beta_{10}$", "$\\beta_{11}$", "$\\beta_{12}$", "$\\beta_{13}$", "$\\beta_5+\\beta_8$", "$\\beta_6+\\beta_9$", "$\\beta_7+\\beta_{10}$", "$\\beta_5+\\beta_{11}$", "$\\beta_6+\\beta_{12}$","$\\beta_7+\\beta_{13}$")
+# 
+# # Print the table using kable
+# knitr::kable(output,caption = "Completers' Model Summary table")
 ```
 
 
 ```{r}
 # mnar - fill na's with different delta --> fit model --> CI's
+# multiple imputations 
+imputed_data <- mice::mice(data = full_data, m = 6, seed =2024, print = FALSE)
 
 # Create a delta vector that represent the following adjustment values for mmHg: 0 for MAR, and -0.7, -0.2, 0.2, and 0.7 for MNAR.
-delta <- c(0, -0.7, -0.2, 0.2, 0.7 )
+delta <- c(-0.7, -0.2, 0.2, 0.7)
 
 imp.all <- vector("list", length(delta))
 post <- imputed_data$post
 for (i in 1:length(delta)){
   d <- delta[i]
   cmd <- paste("imp[[j]][,i] <- imp[[j]][,i] +", d)
-  post["mem_comp"] <- cmd
-  imp <- mice::mice(full_data, post = post,m = 6,seed = i, print = FALSE)
+  post["diff_mem_comp"] <- cmd
+  imp <- mice::mice(full_data, post = post,m = 6,seed = 2024, print = FALSE)
   imp.all[[i]] <- imp
 }
 ```
 
 ```{r}
-# imputation with no adjustment (delta = 0)
+# imputation with no adjustment (delta = -0.7)
 densityplot(imp.all[[1]], lwd = 3)
 ```
 
 ```{r}
-# imputation with adjustment (delta = -0.7)
+# imputation with adjustment (delta = -0.2)
 densityplot(imp.all[[2]], lwd = 3)
 ```
+
 ```{r}
-# imputation with adjustment (delta = -0.2)
+# imputation with adjustment (delta = 0.2)
 densityplot(imp.all[[3]], lwd = 3)
 ```
 
 
 ```{r}
-# imputation with adjustment (delta = 0.2)
+# imputation with adjustment (delta = 0.7)
 densityplot(imp.all[[4]], lwd = 3)
 ```
+
 ```{r}
-# imputation with adjustment (delta = 0.7)
-densityplot(imp.all[[5]], lwd = 3)
+
+for (i in 1:length(delta)){
+  curr_data <- imp.all[[i]]
+  print(mice::stripplot(curr_data, diff_mem_comp))
+}
 ```
 
-
 ```{r,results='asis'}
+int_results<-tibble(
+  statistic = numeric(),
+  df1 = numeric(),
+  df2 = numeric(),
+  p.value=numeric(),
+  riv = numeric()
+)
+
 
 # calculate results for imputation+adjustment datasets
-for (i in 2:length(delta)){
+for (i in 1:length(delta)){
   curr_data <- imp.all[[i]]
   
   # fit model
-  curr_model <- with(curr_data, lmer(mem_comp ~ age + gender + treatment_group+day+treatment_group:day + (1|subject_id)))
-
-  curr.pool.fit <- pool(curr_model)
+  curr_full_model <- with(curr_data,lmer(diff_mem_comp ~ age + gender + treatment_group+day+treatment_group:day+ (1|subject_id),REML=FALSE))
   
-  # pool covar matrix
-  curr_t<-calc_pooled_covar(curr.pool.fit,curr_model)
+  curr_trt_model <- with(curr_data,lmer(diff_mem_comp ~ age + gender + treatment_group+day + (1|subject_id), REML=FALSE))
   
-  # generate ci table
-  curr_table <- pool_coef_ci_table(curr.pool.fit, curr_t, caption = paste0("delta=", delta[i]," Summary Table"))
+  curr.pool.trt.fit <- pool(curr_trt_model) %>% summary
   
+  print(curr.pool.trt.fit %>% kable(caption = paste0("delta=", delta[i]," Summary Table")))
   
+  # anova based on likelihood ratio
+  curr_int_result<-anova(curr_trt_model, curr_full_model,method = "D3")[["out"]][["2 ~~ 1"]][["result"]] %>%
+    t() %>%
+    as.data.frame()
   
+  colnames(curr_int_result) <-c("statistic","df1","df2","p.value","riv")
   
-  print(curr_table)
+  int_results<- int_results %>% rbind(curr_int_result)
 }
 
-
 ```
+
+```{r}
+int_results %>% kable(caption = "Pooled Anova Test For Interaction Term")
+```
+
+
 
 

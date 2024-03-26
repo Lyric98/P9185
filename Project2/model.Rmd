@@ -93,30 +93,29 @@ stripplot
 
 
 ```{r}
-# fit model to each imputed datasets
+temp <- data %>% 
+  group_by(subject_id) %>%
+  mutate(mem_diff = mem_comp - mem_comp[1])
+temp <- temp %>%
+  select(-mem_comp) %>%
+  slice(2:n())
+temp$gender <- as.factor(temp$gender)
+temp$treatment_group <- as.factor(temp$treatment_group)
 
+model <- with(temp, lmer(mem_diff ~ age + gender + treatment_group+day + (1|subject_id)))
 
-model <- with(imputed_data, lmer(mem_comp ~ age + gender + treatment_group+day+treatment_group:day + (1|subject_id)))
+## Aim 1: test separately for two treatment effect
 
-pool.fit <- pool(model)
+summary_output <- summary(model)
+coef_table <- as.data.frame(summary_output$coefficients)
+df <- df.residual(model)
+p_values <- 2 * pt(abs(coef_table[, "t value"]), df = df, lower.tail = FALSE)
+coef_table$p_value <- p_values
+print(coef_table)
 
-summary(pool.fit)
-
-# check the pooled model covariance
-# get the full matrix ubar (instead of only the diagonal)
-m <- pool.fit$m
-ubar <- Reduce("+", lapply(model$analyses, vcov)) / (m)
-b <- pool.fit$pooled$b # this one is still provided by mice
-
-# # or by hand as well
-# qbar <- getqbar(fil.pooled)  # pooled estimates  
-# b <- 1 / (m-1) * rowSums((sapply(fit.mi$analyses, coef) - qbar)^2)
-
-t <- ubar + (1 + 1 / (m)) * b  # this is t as it used to be
-
-# check versus the diagonal of t that is still provided
-all.equal(as.numeric(diag(t)), pool.fit$pooled$t) # check
-
+## Aim 2: jointly test interaction terms
+model <- with(temp, lmer(mem_diff ~ age + gender + treatment_group+day  +treatment_group:day + (1|subject_id)))
+car::Anova(model, type= "III")
 ```
 
 ```{r}

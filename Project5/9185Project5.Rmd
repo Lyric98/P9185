@@ -1,0 +1,152 @@
+---
+title: "project4_analysis"
+author: "Yanran Li"
+date: "2024-04-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(survival)
+library(KMsurv)
+library(flexsurv)
+library(ggsurvfit)
+library(survminer)
+library(patchwork)
+library(lme4)
+library(nlme)
+library(geepack)
+library(gee)
+library(glmtoolbox)
+
+library(rstudioapi)
+## set working directory to wherever this file is located ##
+current_path <- getActiveDocumentContext()$path 
+setwd(dirname(current_path ))
+
+```
+
+
+```{r}
+dat <- readxl::read_excel("./data.xlsx")
+
+# Table 1
+# long.dat <- left_join(long.dat, baseline.dat, by = "ID") %>% 
+#   mutate(OBS = if_else(is.na(SAE), 0, 1)) %>% 
+#   mutate(TIME = as.factor(TIME),
+#          GROUP = as.factor(GROUP),
+#          SITE = as.factor(SITE),
+#          SEX = as.factor(SEX),
+#          SAE = as.factor(SAE))
+
+library(tidyr)
+library(table1)
+library(xtable)
+dat <- dat %>% 
+  mutate(group = as.factor(group),
+         school = as.factor(school),
+         time = as.factor(time))
+
+table1 <- table1(~ group + school +SFD | time, data = dat)
+table1
+
+
+```
+
+```{r}
+# dat transform dat into wide format (each ID have one row)
+
+dat.wide <- dat %>% 
+  pivot_wider(names_from = time, names_glue = "{.value}_{time}", values_from = SFD)
+
+table2 <- table1(~ group  + SFD_1 + SFD_2 + SFD_3 | school , data = dat.wide)
+table2
+
+#spagetti plot (school and control group)
+
+dat %>% 
+  ggplot(aes(x = time, y = SFD, group = ID, color = group)) +
+  geom_line() +
+  facet_wrap(~school) +
+  theme_minimal()
+
+```
+
+
+```{r check the missingness of the data}
+dat %>% 
+  select(SFD) %>% 
+  is.na() %>% 
+  table()
+
+#plot missingness
+library(naniar)
+vis_miss(dat)
+vis_miss(dat.wide)
+
+# Little's MCAR test
+mcar_test(dat.wide)
+# p=0.89, so we can treat them as MCAR
+
+# cancel the 3 ID with all missing SFD
+miss3 <- dat.wide %>% 
+  filter(is.na(SFD_1) & is.na(SFD_2) & is.na(SFD_3)) %>% 
+  pull(ID)
+dat_new = dat %>% 
+  filter(!ID %in% miss3)
+
+# cancel all with missing SFD
+dat_no_missing = dat %>% 
+  filter(!is.na(SFD))
+
+# completer's ID
+has_missing <- dat %>% 
+  filter(is.na(SFD)) %>% 
+  pull(ID)
+dat_complete = dat %>% 
+  filter(!ID %in% has_missing)
+
+
+
+
+
+```
+
+
+```{r}
+# Load the required package
+library(glmmTMB)
+
+# Assuming your data is in a dataframe called 'data'
+# and the variables are named as they appear in your model output
+model <- glmmTMB(cbind(SFD, 14 - SFD) ~ time + group + group*time + (1 | school/ID),
+                 data = dat_complete,
+                 family = betabinomial(link = "logit"),
+                 ziformula = ~1)  # This is for zero-inflation, which appears to be near 1
+
+# Print the summary of the model
+summary(model)
+
+```
+
+
+
+```{r}
+# Load the required package
+library(glmmTMB)
+
+# Assuming your data is in a dataframe called 'data'
+# and the variables are named as they appear in your model output
+model <- glmmTMB(cbind(SFD, 14 - SFD) ~ time + group + group*time + (1 | school/ID),
+                 data = dat_new,
+                 family = betabinomial(link = "logit"),
+                 ziformula = ~1)  # This is for zero-inflation, which appears to be near 1
+
+# Print the summary of the model
+summary(model)
+
+```
+
+
+
